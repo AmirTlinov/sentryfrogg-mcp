@@ -90,7 +90,7 @@ class ProfileService {
 
       // Шифрование пароля
       if (profile.password) {
-        profile.password = this.security.encrypt(profile.password);
+        profile.password = await this.security.encrypt(profile.password);
         profile.encrypted = true;
       }
 
@@ -131,7 +131,7 @@ class ProfileService {
       // Расшифровка пароля
       if (result.encrypted && result.password) {
         try {
-          result.password = this.security.decrypt(result.password);
+          result.password = await this.security.decrypt(result.password);
           delete result.encrypted;
         } catch (error) {
           this.logger.error('Failed to decrypt password', { name, error: error.message });
