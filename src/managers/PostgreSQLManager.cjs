@@ -219,7 +219,9 @@ class PostgreSQLManager {
       // Добавление LIMIT для SELECT запросов
       let finalSql = sql;
       if (sql.toUpperCase().trim().startsWith('SELECT') && !sql.toUpperCase().includes('LIMIT')) {
-        finalSql = `${sql} LIMIT ${limit}`;
+        // Нормализация SQL: убираем переносы строк и точки с запятой в конце
+        const normalizedSql = sql.trim().replace(/\s+/g, ' ').replace(/;$/, '');
+        finalSql = `${normalizedSql} LIMIT ${limit}`;
       }
 
       const result = await pool.query(finalSql);
