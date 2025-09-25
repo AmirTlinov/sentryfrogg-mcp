@@ -20,7 +20,7 @@
   "mcpServers": {
     "sentryfrogg": {
       "command": "node",
-      "args": ["path/to/simple_openmcp_server.cjs"]
+      "args": ["path/to/sentryfrogg_server.cjs"]
     }
   }
 }
@@ -111,7 +111,7 @@
   "mcpServers": {
     "postgresql-api-ssh": {
       "command": "node",
-      "args": ["path/to/simple_openmcp_server.cjs"]
+      "args": ["path/to/sentryfrogg_server.cjs"]
     }
   }
 }
@@ -121,7 +121,7 @@
   "mcpServers": {
     "psql-ssh-api": {
       "command": "node", 
-      "args": ["path/to/simple_openmcp_server.cjs"]
+      "args": ["path/to/sentryfrogg_server.cjs"]
     }
   }
 }
@@ -161,7 +161,7 @@
 
 #### 🏗️ Новая модульная структура
 ```
-simple_openmcp_server.cjs (275 строк) - Главный сервер
+sentryfrogg_server.cjs (275 строк) - Главный сервер
 src/
 ├── constants/index.cjs   - Конфигурация и константы
 ├── logger/index.cjs      - Структурированное логирование  
