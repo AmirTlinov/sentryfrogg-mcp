@@ -2,12 +2,12 @@
   "name": "sentryfrogg-mcp",
   "version": "4.2.0",
   "description": "Enterprise MCP server for PostgreSQL, SSH and HTTP operations under the SentryFrogg brand",
-  "main": "simple_openmcp_server.cjs",
+  "main": "sentryfrogg_server.cjs",
   "type": "commonjs",
   "scripts": {
-    "start": "node simple_openmcp_server.cjs",
-    "dev": "node simple_openmcp_server.cjs",
-    "check": "node --check simple_openmcp_server.cjs"
+    "start": "node sentryfrogg_server.cjs",
+    "dev": "node sentryfrogg_server.cjs",
+    "check": "node --check sentryfrogg_server.cjs"
   },
   "keywords": [
     "mcp",
@@ -55,7 +55,7 @@
   },
   "homepage": "https://github.com/your-username/sentryfrogg-mcp#readme",
   "files": [
-    "simple_openmcp_server.cjs",
+    "sentryfrogg_server.cjs",
     "src/",
     "package.json",
     "README.md",

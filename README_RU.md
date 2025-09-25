@@ -14,7 +14,7 @@ SentryFrogg MCP Server предоставляет управляемый дос�
 
 ## Архитектура
 ```
-simple_openmcp_server.cjs      # Точка входа MCP
+sentryfrogg_server.cjs      # Точка входа MCP
 src/
 ├── bootstrap/ServiceBootstrap.cjs
 ├── managers/
@@ -54,7 +54,7 @@ npm run check
   "mcpServers": {
     "sentryfrogg": {
       "command": "node",
-      "args": ["C:\\path\\to\\sentryfrogg-mcp\\simple_openmcp_server.cjs"],
+      "args": ["C:\\path\\to\\sentryfrogg-mcp\\sentryfrogg_server.cjs"],
       "env": { "NODE_ENV": "production" }
     }
   }

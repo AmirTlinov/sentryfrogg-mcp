@@ -18,7 +18,7 @@ SentryFrogg MCP Server provides an auditable bridge between Model Context Protoc
 
 ## Architecture
 ```
-simple_openmcp_server.cjs      # MCP entry point
+sentryfrogg_server.cjs      # MCP entry point
 src/
 ├── bootstrap/ServiceBootstrap.cjs
 ├── managers/
@@ -58,7 +58,7 @@ Claude Desktop example (Windows paths shown for clarity):
   "mcpServers": {
     "sentryfrogg": {
       "command": "node",
-      "args": ["C:\\path\\to\\sentryfrogg-mcp\\simple_openmcp_server.cjs"],
+      "args": ["C:\\path\\to\\sentryfrogg-mcp\\sentryfrogg_server.cjs"],
       "env": { "NODE_ENV": "production" }
     }
   }
