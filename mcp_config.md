@@ -1,401 +1,114 @@
-# 🚀 КОМПАКТНЫЙ MCP СЕРВЕР v4.0.0 - ИНСТРУКЦИЯ ДЛЯ ИИ АГЕНТОВ
+# 🚀 MCP SERVER v4.1.0 — КОНСПЕКТ ДЛЯ АГЕНТОВ
 
-## 📋 ОСНОВНЫЕ ПРАВИЛА
-
-### 1. ПЕРВОНАЧАЛЬНАЯ НАСТРОЙКА
-**ВАЖНО:** Сначала настройте профили подключения, чтобы не вводить пароль каждый раз!
-
-### 2. ПРОСТЫЕ КОМАНДЫ
-Всего 3 инструмента:
-- `mcp_psql_manager` - База данных
-- `mcp_ssh_manager` - SSH подключения
-- `mcp_api_client` - API запросы
+## 📌 ОБЩИЕ ПРАВИЛА
+- Сначала создаём профиль (`setup_profile`), затем используем остальные действия без пароля
+- Один JSON-параметр `action` определяет всё поведение
+- Ответы всегда приходят в JSON и содержат `success`
 
 ---
 
-## 🗄️ POSTGRESQL МЕНЕДЖЕР
+## 🗄️ PostgreSQL (`mcp_psql_manager`)
 
-### 🔧 НАСТРОЙКА ПРОФИЛЯ (ОБЯЗАТЕЛЬНО ПЕРВЫМ ДЕЛОМ)
+### Создать/обновить профиль
 ```json
 {
   "action": "setup_profile",
   "profile_name": "default",
-  "host": "localhost",
-  "port": 5432,
-  "username": "postgres",
-  "password": "ваш_пароль",
-  "database": "имя_базы"
+  "connection_url": "postgres://postgres:postgres@localhost:5432/demo"
 }
 ```
 
-### 📊 ОСНОВНЫЕ КОМАНДЫ (БЕЗ ПАРОЛЯ)
-
-#### Быстрый SQL запрос
+### Полезные действия
 ```json
-{
-  "action": "quick_query",
-  "sql": "SELECT * FROM users LIMIT 5"
-}
+{ "action": "list_profiles" }
+{ "action": "show_tables" }
+{ "action": "describe_table", "table_name": "users" }
+{ "action": "sample_data", "table_name": "users", "limit": 5 }
+{ "action": "quick_query", "sql": "SELECT * FROM users WHERE id = $1", "params": [1] }
+{ "action": "insert_data", "table_name": "users", "data": { "name": "Ada" } }
+{ "action": "update_data", "table_name": "users", "data": { "active": true }, "where": "id = 1" }
+{ "action": "delete_data", "table_name": "users", "where": "id = 1" }
+{ "action": "database_info" }
 ```
 
-#### Показать все таблицы
-```json
-{
-  "action": "show_tables"
-}
-```
-
-#### Описание таблицы
-```json
-{
-  "action": "describe_table",
-  "table_name": "users"
-}
-```
-
-#### Примеры данных
-```json
-{
-  "action": "sample_data",
-  "table_name": "users",
-  "limit": 10
-}
-```
-
-#### Вставка данных
-```json
-{
-  "action": "insert_data",
-  "table_name": "users",
-  "data": {
-    "name": "Иван",
-    "email": "ivan@example.com"
-  }
-}
-```
-
-#### Обновление данных
-```json
-{
-  "action": "update_data",
-  "table_name": "users",
-  "data": {
-    "email": "newemail@example.com"
-  },
-  "where": "id = 1"
-}
-```
-
-#### Удаление данных
-```json
-{
-  "action": "delete_data",
-  "table_name": "users",
-  "where": "id = 1"
-}
-```
-
-#### Создание таблицы
-```json
-{
-  "action": "create_table",
-  "table_name": "products",
-  "columns": [
-    {"name": "id", "type": "SERIAL", "primary_key": true},
-    {"name": "name", "type": "VARCHAR(100)", "not_null": true},
-    {"name": "price", "type": "DECIMAL(10,2)", "default": "0.00"}
-  ]
-}
-```
-
-#### Информация о базе данных
-```json
-{
-  "action": "database_info"
-}
-```
+> Совет: если в `quick_query` нет `LIMIT`, сервер автоматически добавит `LIMIT 100`.
 
 ---
 
-## 🔐 SSH МЕНЕДЖЕР
+## 🔐 SSH (`mcp_ssh_manager`)
 
-### 🔧 НАСТРОЙКА ПРОФИЛЯ (ОБЯЗАТЕЛЬНО ПЕРВЫМ ДЕЛОМ)
+### Создать профиль
 ```json
 {
   "action": "setup_profile",
-  "profile_name": "default",
-  "host": "example.com",
-  "port": 22,
-  "username": "root",
-  "password": "ваш_пароль"
+  "profile_name": "prod",
+  "host": "myserver.com",
+  "username": "ubuntu",
+  "private_key": "-----BEGIN...",
+  "passphrase": "secret"
 }
 ```
 
-### 💻 ОСНОВНЫЕ КОМАНДЫ (БЕЗ ПАРОЛЯ)
-
-#### Выполнение команды
+### Выполнить команду
 ```json
 {
   "action": "execute",
-  "command": "ls -la /var/www"
+  "profile_name": "prod",
+  "command": "ls -la | head"
 }
 ```
 
-#### Информация о системе
+### Быстрые проверки
 ```json
-{
-  "action": "system_info"
-}
+{ "action": "list_profiles" }
+{ "action": "system_info", "profile_name": "prod" }
+{ "action": "check_host", "profile_name": "prod" }
 ```
 
-#### Список профилей
-```json
-{
-  "action": "list_profiles"
-}
-```
+Команды исполняются последовательно для каждого профиля, поэтому `system_info` и `execute` не мешают друг другу.
 
 ---
 
-## 🌐 API КЛИЕНТ
+## 🌐 HTTP (`mcp_api_client`)
 
-### 📡 ПРОСТЫЕ HTTP ЗАПРОСЫ
-
-#### GET запрос
+### Базовый GET
 ```json
 {
-  "method": "GET",
+  "action": "get",
   "url": "https://api.example.com/users"
 }
 ```
 
-#### POST запрос
+### POST с телом и токеном
 ```json
 {
-  "method": "POST",
+  "action": "post",
   "url": "https://api.example.com/users",
-  "data": {
-    "name": "Иван",
-    "email": "ivan@example.com"
-  }
+  "data": { "name": "Ada" },
+  "auth_token": "Bearer abc.def.ghi"
 }
 ```
 
-#### Запрос с авторизацией
+### Health-check
 ```json
 {
-  "method": "GET",
-  "url": "https://api.example.com/protected",
-  "auth_token": "ваш_токен"
+  "action": "check_api",
+  "url": "http://localhost:3000/status"
 }
 ```
+
+> Заголовки можно передавать через объект `headers`. Локальные URL разрешены.
 
 ---
 
-## 🎯 ПРИМЕР ПОЛНОГО WORKFLOW
-
-### 1. Настройка PostgreSQL
-```json
-{
-  "action": "setup_profile",
-  "host": "localhost",
-  "username": "postgres",
-  "password": "mypassword",
-  "database": "mydb"
-}
+## ⚡ Типовой сценарий
+```jsonc
+// DB -> SSH -> HTTP за пару шагов
+{ "action": "setup_profile", "connection_url": "postgres://postgres:postgres@localhost:5432/demo" }
+{ "action": "quick_query", "sql": "SELECT COUNT(*) FROM users" }
+{ "action": "setup_profile", "profile_name": "prod", "host": "myserver.com", "username": "ubuntu", "private_key": "-----BEGIN..." } // вызвать в инструменте mcp_ssh_manager
+{ "action": "check_host", "profile_name": "prod" }
+{ "action": "get", "url": "http://127.0.0.1:8080/health" }
 ```
 
-### 2. Просмотр таблиц
-```json
-{
-  "action": "show_tables"
-}
-```
-
-### 3. Работа с данными
-```json
-{
-  "action": "quick_query",
-  "sql": "SELECT COUNT(*) FROM users"
-}
-```
-
-### 4. Настройка SSH
-```json
-{
-  "action": "setup_profile",
-  "host": "myserver.com",
-  "username": "admin",
-  "password": "sshpassword"
-}
-```
-
-### 5. Проверка сервера
-```json
-{
-  "action": "system_info"
-}
-```
-
----
-
-## ⚡ ПРЕИМУЩЕСТВА НОВОЙ ВЕРСИИ
-
-- ✅ **Пароль только один раз** - при настройке профиля
-- ✅ **Простые команды** - понятные действия
-- ✅ **Автоматическое управление** - соединениями
-- ✅ **Безопасность** - пароли хранятся в памяти
-- ✅ **Удобство** - минимум параметров для каждого запроса
-
----
-
-## 🚫 ТИПИЧНЫЕ ОШИБКИ
-
-### ❌ НЕПРАВИЛЬНО:
-```json
-{
-  "action": "quick_query",
-  "sql": "SELECT * FROM users",
-  "host": "localhost",
-  "username": "postgres",
-  "password": "mypassword"
-}
-```
-
-### ✅ ПРАВИЛЬНО:
-1. Сначала настроить профиль:
-```json
-{
-  "action": "setup_profile",
-  "host": "localhost",
-  "username": "postgres",
-  "password": "mypassword",
-  "database": "mydb"
-}
-```
-
-2. Затем выполнить запрос:
-```json
-{
-  "action": "quick_query",
-  "sql": "SELECT * FROM users"
-}
-```
-
----
-
-## 📚 ДОПОЛНИТЕЛЬНЫЕ ВОЗМОЖНОСТИ
-
-### Использование именованных профилей
-```json
-{
-  "action": "setup_profile",
-  "profile_name": "production",
-  "host": "prod.example.com",
-  "username": "produser",
-  "password": "prodpass",
-  "database": "proddb"
-}
-```
-
-```json
-{
-  "action": "quick_query",
-  "profile_name": "production",
-  "sql": "SELECT * FROM orders"
-}
-```
-
-### Работа с несколькими серверами
-```json
-{
-  "action": "setup_profile",
-  "profile_name": "server1",
-  "host": "server1.com",
-  "username": "admin",
-  "password": "pass1"
-}
-```
-
-```json
-{
-  "action": "setup_profile",
-  "profile_name": "server2",
-  "host": "server2.com",
-  "username": "root",
-  "password": "pass2"
-}
-```
-
----
-
-## 🔍 TROUBLESHOOTING
-
-### Проблема: "Профиль не найден"
-**Решение:** Сначала создайте профиль с `setup_profile`
-
-### Проблема: "Пароль обязателен"
-**Решение:** Либо создайте профиль `default`, либо укажите `profile_name`
-
-### Проблема: "Соединение не установлено"
-**Решение:** Проверьте параметры подключения в профиле
-
----
-
-## 🎉 ГОТОВО!
-
-Теперь ИИ агенты могут легко работать с PostgreSQL, SSH и API без постоянного ввода паролей!
-
----
-
-## 🔧 КОНФИГУРАЦИЯ ДЛЯ CURSOR
-
-### Добавление MCP сервера в Cursor
-
-1. **Откройте настройки Cursor** (Ctrl+,)
-2. **Найдите раздел "MCP Servers"**
-3. **Добавьте новый сервер:**
-
-```json
-{
-  "postgresql-api-ssh-mcp-server": {
-    "command": "node",
-    "args": ["simple_openmcp_server.cjs"],
-    "cwd": "/путь/к/вашему/проекту/PSQL_SSH_API_MCP"
-  }
-}
-```
-
-**Важно:** Замените `/путь/к/вашему/проекту/PSQL_SSH_API_MCP` на реальный путь к папке с проектом.
-
-### Проверка работы
-
-После добавления в настройки:
-
-1. **Перезапустите Cursor**
-2. **Откройте чат**
-3. **Проверьте, что в списке инструментов есть:**
-   - `mcp_postgresql-api-ssh-mcp-server_postgresql_manager`
-   - `mcp_postgresql-api-ssh-mcp-server_ssh_manager`
-   - `mcp_postgresql-api-ssh-mcp-server_universal_api_client`
-
-### Альтернативная конфигурация (если npm установлен глобально)
-
-```json
-{
-  "postgresql-api-ssh-mcp-server": {
-    "command": "npm",
-    "args": ["start"],
-    "cwd": "/путь/к/вашему/проекту/PSQL_SSH_API_MCP"
-  }
-}
-```
-
-### Устранение проблем
-
-**Проблема:** Сервер показывает 0 инструментов (красный статус)
-**Решение:**
-1. Проверьте правильность пути в `cwd`
-2. Убедитесь, что файл `simple_openmcp_server.cjs` существует
-3. Проверьте, что установлены все зависимости: `npm install`
-4. Перезапустите Cursor после изменения конфигурации 
+Готово! Больше никаких догадок — только прямые команды.

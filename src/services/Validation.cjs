@@ -1,270 +1,124 @@
 #!/usr/bin/env node
 
 /**
- * ✅ VALIDATION SERVICE
- * Система валидации входных данных и параметров
+ * ✅ Простая валидация входных данных
  */
 
 const Constants = require('../constants/Constants.cjs');
-const NetworkUtils = require('../utils/NetworkUtils.cjs');
 
 class Validation {
   constructor(logger) {
-    this.logger = logger;
-    this.stats = {
-      validations: 0,
-      errors: 0,
-      warnings: 0
-    };
+    this.logger = logger.child('validation');
   }
 
-  // Валидация профиля подключения
-  validateConnectionProfile(profile) {
-    this.stats.validations++;
-    
-    const errors = [];
-    
-    if (!profile || typeof profile !== 'object') {
-      errors.push('Profile must be an object');
-      return { valid: false, errors };
+  ensureString(value, label) {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      throw new Error(`${label} must be a non-empty string`);
     }
-
-    // Проверка обязательных полей
-    if (!profile.host || typeof profile.host !== 'string') {
-      errors.push('Host is required and must be a string');
-    }
-
-    if (!profile.username || typeof profile.username !== 'string') {
-      errors.push('Username is required and must be a string');
-    }
-
-    if (!profile.password || typeof profile.password !== 'string') {
-      errors.push('Password is required and must be a string');
-    }
-
-    // Проверка порта
-    if (profile.port !== undefined) {
-      const portValidation = NetworkUtils.validatePort(profile.port);
-      if (!portValidation.valid) {
-        errors.push(portValidation.error);
-      }
-    }
-
-    // Проверка базы данных (для PostgreSQL)
-    if (profile.database !== undefined && typeof profile.database !== 'string') {
-      errors.push('Database must be a string');
-    }
-
-    const valid = errors.length === 0;
-    if (!valid) {
-      this.stats.errors++;
-      this.logger.warn('Profile validation failed', { errors });
-    }
-
-    return { valid, errors };
+    return value.trim();
   }
 
-  // Валидация SQL запроса
-  validateSqlQuery(sql) {
-    this.stats.validations++;
-    
-    const errors = [];
-    
-    if (!sql || typeof sql !== 'string') {
-      errors.push('SQL query must be a non-empty string');
-      return { valid: false, errors };
+  ensureOptionalString(value, label) {
+    if (value === undefined || value === null) {
+      return undefined;
     }
-
-    // Проверка на опасные команды
-    const dangerousCommands = [
-      'DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'CREATE', 'GRANT', 'REVOKE'
-    ];
-    
-    const upperSql = sql.toUpperCase();
-    for (const cmd of dangerousCommands) {
-      if (upperSql.includes(cmd)) {
-        this.stats.warnings++;
-        this.logger.warn('Potentially dangerous SQL command detected', { command: cmd });
-      }
-    }
-
-    // Проверка на множественные команды
-    if (sql.includes(';') && sql.trim().split(';').length > 2) {
-      errors.push('Multiple SQL commands not allowed');
-    }
-
-    const valid = errors.length === 0;
-    if (!valid) {
-      this.stats.errors++;
-    }
-
-    return { valid, errors };
+    return this.ensureString(value, label);
   }
 
-  // Валидация SSH команды
-  validateSshCommand(command) {
-    this.stats.validations++;
-    
-    const errors = [];
-    
-    if (!command || typeof command !== 'string') {
-      errors.push('Command must be a non-empty string');
-      return { valid: false, errors };
+  ensurePort(port, fallback) {
+    if (port === undefined || port === null || port === '') {
+      return fallback;
     }
 
-    // Проверка на опасные команды
-    const dangerousCommands = [
-      'rm -rf', 'format', 'dd if=', 'mkfs', 'fdisk', 'shutdown', 'reboot',
-      'passwd', 'useradd', 'userdel', 'chmod 777', 'chown root'
-    ];
-    
-    const lowerCommand = command.toLowerCase();
-    for (const cmd of dangerousCommands) {
-      if (lowerCommand.includes(cmd)) {
-        this.stats.warnings++;
-        this.logger.warn('Potentially dangerous SSH command detected', { command: cmd });
-      }
+    const numeric = Number(port);
+    if (!Number.isInteger(numeric) || numeric < Constants.LIMITS.MIN_PORT || numeric > Constants.LIMITS.MAX_PORT) {
+      throw new Error(`Port must be an integer between ${Constants.LIMITS.MIN_PORT} and ${Constants.LIMITS.MAX_PORT}`);
     }
-
-    // Проверка на множественные команды
-    if (command.includes('&&') || command.includes('||') || command.includes(';')) {
-      this.stats.warnings++;
-      this.logger.warn('Multiple SSH commands detected');
-    }
-
-    const valid = errors.length === 0;
-    if (!valid) {
-      this.stats.errors++;
-    }
-
-    return { valid, errors };
+    return numeric;
   }
 
-  // Валидация HTTP URL
-  validateHttpUrl(url) {
-    this.stats.validations++;
-    
-    const errors = [];
-    
-    const validation = NetworkUtils.validateUrl(url);
-    
-    if (!validation.valid) {
-      errors.push(validation.error);
-      return { valid: false, errors };
+  ensureLimit(limit, defaultValue = Constants.LIMITS.DEFAULT_QUERY_LIMIT) {
+    if (limit === undefined || limit === null) {
+      return defaultValue;
     }
-
-    // Предупреждение для localhost
-    if (validation.isLocal) {
-      this.stats.warnings++;
-      this.logger.warn('Local URL detected', { url });
+    const numeric = Number(limit);
+    if (!Number.isInteger(numeric) || numeric < Constants.LIMITS.MIN_QUERY_LIMIT || numeric > Constants.LIMITS.MAX_QUERY_LIMIT) {
+      throw new Error(`Limit must be between ${Constants.LIMITS.MIN_QUERY_LIMIT} and ${Constants.LIMITS.MAX_QUERY_LIMIT}`);
     }
-
-    const valid = errors.length === 0;
-    if (!valid) {
-      this.stats.errors++;
-    }
-
-    return { valid, errors };
+    return numeric;
   }
 
-  // Валидация данных для вставки
-  validateInsertData(data) {
-    this.stats.validations++;
-    
-    const errors = [];
-    
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      errors.push('Data must be an object');
-      return { valid: false, errors };
+  ensureTableName(name) {
+    const trimmed = this.ensureString(name, 'Table name');
+    const pattern = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+    if (!pattern.test(trimmed)) {
+      throw new Error('Table name may contain only letters, digits and underscores, starting with letter or underscore');
     }
+    if (trimmed.length > Constants.LIMITS.MAX_TABLE_NAME_LENGTH) {
+      throw new Error(`Table name must be ${Constants.LIMITS.MAX_TABLE_NAME_LENGTH} characters or less`);
+    }
+    return trimmed;
+  }
 
-    // Проверка на пустой объект
+  ensureDataObject(data) {
+    if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+      throw new Error('Data must be an object');
+    }
     if (Object.keys(data).length === 0) {
-      errors.push('Data object cannot be empty');
+      throw new Error('Data object must not be empty');
     }
-
-    // Проверка имен полей
-    for (const key of Object.keys(data)) {
-      if (typeof key !== 'string' || key.length === 0) {
-        errors.push(`Invalid field name: ${key}`);
-      }
-      
-      // Проверка на SQL injection в именах полей
-      if (key.includes("'") || key.includes('"') || key.includes(';')) {
-        errors.push(`Potentially dangerous field name: ${key}`);
-      }
-    }
-
-    const valid = errors.length === 0;
-    if (!valid) {
-      this.stats.errors++;
-    }
-
-    return { valid, errors };
+    return data;
   }
 
-  // Валидация имени таблицы
-  validateTableName(tableName) {
-    this.stats.validations++;
-    
-    const errors = [];
-    
-    if (!tableName || typeof tableName !== 'string') {
-      errors.push('Table name must be a non-empty string');
-      return { valid: false, errors };
+  ensureConnectionProfile(profile, { requireDatabase = false, defaultPort, requirePassword = true } = {}) {
+    if (typeof profile !== 'object' || profile === null) {
+      throw new Error('Profile must be an object');
     }
 
-    // Проверка формата имени таблицы
-    const validPattern = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-    if (!validPattern.test(tableName)) {
-      errors.push('Table name must start with letter or underscore and contain only letters, numbers, and underscores');
+    const normalized = {
+      host: this.ensureString(profile.host, 'Host'),
+      port: this.ensurePort(profile.port, defaultPort),
+      username: this.ensureString(profile.username, 'Username'),
+    };
+
+    if (requirePassword) {
+      normalized.password = this.ensureString(profile.password, 'Password');
+    } else if (profile.password !== undefined) {
+      normalized.password = this.ensureString(profile.password, 'Password');
     }
 
-    // Проверка длины
-    if (tableName.length > Constants.LIMITS.MAX_TABLE_NAME_LENGTH) {
-      errors.push(`Table name must be ${Constants.LIMITS.MAX_TABLE_NAME_LENGTH} characters or less`);
+    if (requireDatabase) {
+      normalized.database = this.ensureString(profile.database, 'Database name');
+    } else if (profile.database) {
+      normalized.database = this.ensureString(profile.database, 'Database name');
     }
 
-    const valid = errors.length === 0;
-    if (!valid) {
-      this.stats.errors++;
-    }
-
-    return { valid, errors };
+    return normalized;
   }
 
-  // Валидация лимита записей
-  validateLimit(limit) {
-    this.stats.validations++;
-    
-    const errors = [];
-    
-    if (limit !== undefined) {
-      if (!Number.isInteger(limit) || limit < Constants.LIMITS.MIN_QUERY_LIMIT || limit > Constants.LIMITS.MAX_QUERY_LIMIT) {
-        errors.push(`Limit must be an integer between ${Constants.LIMITS.MIN_QUERY_LIMIT} and ${Constants.LIMITS.MAX_QUERY_LIMIT}`);
-      }
-    }
-
-    const valid = errors.length === 0;
-    if (!valid) {
-      this.stats.errors++;
-    }
-
-    return { valid, errors };
+  ensureSql(sql) {
+    return this.ensureString(sql, 'SQL query');
   }
 
-  getStats() {
-    return { ...this.stats };
+  ensureWhereClause(where) {
+    return this.ensureString(where, 'WHERE clause');
   }
 
-  async cleanup() {
-    // Validation service не требует cleanup
-    return;
+  ensureHeaders(headers) {
+    if (headers === undefined || headers === null) {
+      return {};
+    }
+
+    if (typeof headers !== 'object' || Array.isArray(headers)) {
+      throw new Error('Headers must be an object');
+    }
+
+    return Object.fromEntries(
+      Object.entries(headers)
+        .filter(([key, value]) => typeof key === 'string' && typeof value === 'string')
+        .map(([key, value]) => [key.trim(), value.trim()])
+    );
   }
 }
 
-function createValidation(logger) {
-  return new Validation(logger);
-}
-
-module.exports = Validation; 
+module.exports = Validation;

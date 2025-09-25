@@ -1,326 +1,135 @@
-# 🚀 COMPACT PostgreSQL + API + SSH MCP SERVER v4.0.0
+# 🚀 COMPACT PostgreSQL + API + SSH MCP SERVER v4.1.0
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-16%2B-green.svg)](https://nodejs.org/)
-[![Security](https://img.shields.io/badge/Security-AES--256--CBC-red.svg)](https://en.wikipedia.org/wiki/Advanced_Encryption_Standard)
 [![MCP](https://img.shields.io/badge/MCP-SDK-blue.svg)](https://github.com/modelcontextprotocol/sdk)
 
 > **English version | [Русская версия](README_RU.md)**
 
-> **Specifically designed for AI agents** - Service Layer architecture, maximum security, short names!
+Built for AI agents: tiny surface area, predictable responses, no cognitive traps.
 
-## 🎯 KEY ADVANTAGES v4.0.0
+## 🎯 WHAT'S NEW IN 4.1.0
 
-- ✅ **Service Layer Architecture** - Professional DI-based modular design
-- ✅ **Maximum Security** - Protection against SQL injection, command injection, SSRF
-- ✅ **Password Encryption** - AES-256-CBC, passwords never stored in plain text
-- ✅ **Optimized Names** - 70% shorter tool names (resolves MCP filtering issues)
-- ✅ **Structured Logging** - Detailed logs of all operations
-- ✅ **Simple Commands** - Clear actions without complex parameters
-- ✅ **Automatic Management** - Connections and sessions handled automatically
+- ✅ **Ultra-light service layer** – one bootstrap + three managers, no hidden DI magic
+- ✅ **Persistent profile secrets** – AES-256 key is generated once and reused automatically
+- ✅ **Friendly tooling** – PostgreSQL, SSH and HTTP clients expose consistent `action` payloads
+- ✅ **Agent-first ergonomics** – helpful errors, sequential SSH execution, JSON everywhere
+- ✅ **Docs that match reality** – every example is copy/paste ready
 
-## 🏗️ ARCHITECTURE v4.0.0
-
-### Service Layer Structure:
+## 🏗️ ARCHITECTURE SNAPSHOT
 ```
-simple_openmcp_server.cjs (252 lines) - Main server
+simple_openmcp_server.cjs      # MCP entry point
 src/
-├── core/ServiceContainer.cjs      # Dependency Injection container
-├── services/                      # Business services
-│   ├── ConnectionService.cjs      # Universal connection management
-│   ├── QueryService.cjs          # Centralized query execution
-│   └── ProfileService.cjs        # Profile management
-├── managers/                      # Thin orchestrators
-│   ├── PostgreSQLManager.cjs     # PostgreSQL operations
-│   └── SSHManager.cjs            # SSH operations
-├── bootstrap/ServiceBootstrap.cjs # Service initialization
-├── errors/index.cjs              # Error handling
-├── constants/index.cjs           # Configuration constants
-└── api/index.cjs                 # API client
+├── bootstrap/ServiceBootstrap.cjs
+├── managers/
+│   ├── PostgreSQLManager.cjs
+│   ├── SSHManager.cjs
+│   └── APIManager.cjs
+├── services/
+│   ├── Logger.cjs
+│   ├── Security.cjs
+│   ├── Validation.cjs
+│   └── ProfileService.cjs
+├── constants/Constants.cjs
+└── mcp_config.md              # Agent-facing cheatsheet
 ```
-
-### Improvements from v3.0.0:
-- **-30%** PostgreSQL Manager size (476 → 333 lines)
-- **-35%** SSH Manager size (442 → 286 lines)
-- **-70%** tool name lengths (81 → 27-29 characters)
-- **+25%** throughput improvement
-- **+20%** faster initialization
+No legacy containers, no god-objects – just the pieces that matter.
 
 ## 🔧 INSTALLATION
-
-### 1. Clone Repository
 ```bash
 git clone https://github.com/yourusername/psql-ssh-api.git
 cd psql-ssh-api
-```
-
-### 2. Install Dependencies
-```bash
 npm install
-```
-
-### 3. Test Server
-```bash
 npm run check
 ```
 
-### 4. Configure Claude Desktop
-Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+Add the server to Claude Desktop (Windows example):
 ```json
 {
   "mcpServers": {
     "psql-ssh-api": {
       "command": "node",
-      "args": ["C:\\path\\to\\your\\psql-ssh-api\\simple_openmcp_server.cjs"],
-      "env": {
-        "NODE_ENV": "production"
-      }
+      "args": ["C:\\path\\to\\psql-ssh-api\\simple_openmcp_server.cjs"],
+      "env": { "NODE_ENV": "production" }
     }
   }
 }
 ```
 
-## 🛡️ SECURITY v4.0.0
+## 🔐 PROFILES & SECURITY
+- Passwords are encrypted with AES-256-CBC and stored in `profiles.json`
+- Encryption key is kept in `.mcp_profiles.key` (auto-created with `0600` permissions)
+- Set `ENCRYPTION_KEY` to override the key or share profiles between machines
+- Data validation focuses on correctness and usability; no overzealous blocking
 
-### Vulnerability Protection:
-- **SQL Injection** - Comprehensive SQL query validation
-- **Command Injection** - SSH command sanitization
-- **SSRF Attacks** - URL validation for API requests
-- **XSS** - Input data sanitization
-- **Password Security** - AES-256-CBC encryption
+## 🛠️ TOOLS OVERVIEW
 
-### Validation System:
-- All input parameters checked
-- Data size and request count limits
-- All suspicious operations logged
-- Automatic blocking of dangerous patterns
+### `mcp_psql_manager`
+| Action | Description | Minimal payload |
+| --- | --- | --- |
+| `setup_profile` | Save PostgreSQL credentials or `connection_url` | `{ "action": "setup_profile", "host": "localhost", "username": "postgres", "password": "xxx", "database": "mydb" }` |
+| `list_profiles` | List saved PostgreSQL profiles | `{ "action": "list_profiles" }` |
+| `quick_query` | Run SQL; auto-adds `LIMIT` if needed, supports params | `{ "action": "quick_query", "sql": "SELECT * FROM users WHERE id = $1", "params": [1] }` |
+| `show_tables` | Show non-system tables | `{ "action": "show_tables" }` |
+| `describe_table` | Column metadata | `{ "action": "describe_table", "table_name": "users" }` |
+| `sample_data` | Grab rows with limit | `{ "action": "sample_data", "table_name": "users", "limit": 10 }` |
+| `insert_data` | Insert JSON object | `{ "action": "insert_data", "table_name": "users", "data": { "name": "Ada" } }` |
+| `update_data` | Update rows | `{ "action": "update_data", "table_name": "users", "data": { "active": true }, "where": "id = 1" }` |
+| `delete_data` | Delete rows | `{ "action": "delete_data", "table_name": "users", "where": "id = 1" }` |
+| `database_info` | Basic DB stats | `{ "action": "database_info" }` |
 
-## 🎮 QUICK START
+### `mcp_ssh_manager`
+| Action | Description | Minimal payload |
+| --- | --- | --- |
+| `setup_profile` | Save SSH host (password or private_key) | `{ "action": "setup_profile", "host": "example.com", "username": "root", "password": "xxx" }` |
+| `list_profiles` | List SSH targets | `{ "action": "list_profiles" }` |
+| `execute` | Run shell command | `{ "action": "execute", "command": "ls -la" }` |
+| `system_info` | Collect basic facts | `{ "action": "system_info" }` |
+| `check_host` | Quick reachability ping | `{ "action": "check_host" }` |
 
-### 1. Setup PostgreSQL Profile
-```json
-{
-  "action": "setup_profile",
-  "host": "localhost",
-  "username": "postgres",
-  "password": "yourpassword",
-  "database": "mydb"
-}
+Commands are trimmed, length-checked and executed sequentially per host to avoid race conditions, while still allowing pipes, redirects and multi-part commands.
+
+### `mcp_api_client`
+| Action | Description | Minimal payload |
+| --- | --- | --- |
+| `get`/`post`/`put`/`delete`/`patch` | Standard HTTP verbs | `{ "action": "get", "url": "https://api.example.com/users" }` |
+| `check_api` | Lightweight health-check | `{ "action": "check_api", "url": "https://api.example.com/ping" }` |
+
+Headers go under `headers`, request body under `data` (auto-JSON). Local and private URLs are allowed – ideal for internal tooling.
+
+## ⚡ QUICK START WORKFLOW
+```jsonc
+// 1. Save DB profile via connection url
+{ "action": "setup_profile", "connection_url": "postgres://postgres:postgres@localhost:5432/demo" }
+
+// 2. Inspect tables
+{ "action": "show_tables" }
+
+// 3. Preview data
+{ "action": "sample_data", "table_name": "users", "limit": 5 }
+
+// 4. Save SSH profile with private key
+{ "action": "setup_profile", "profile_name": "prod", "host": "myserver.com", "username": "ubuntu", "private_key": "-----BEGIN...", "passphrase": "secret" }
+
+// 5. Check host health
+{ "action": "check_host", "profile_name": "prod" }
+
+// 6. Hit an internal API
+{ "action": "get", "url": "http://localhost:3000/status" }
 ```
 
-### 2. Work with Database (no password needed!)
-```json
-{
-  "action": "show_tables"
-}
-```
+## 📊 STATS & CLEANUP
+Every manager exposes a `getStats()` helper (used by `simple_openmcp_server.cjs`) so you can debug usage or surface telemetry if desired.
 
-### 3. Setup SSH Profile
-```json
-{
-  "action": "setup_profile",
-  "host": "myserver.com",
-  "username": "admin",
-  "password": "sshpassword"
-}
-```
-
-### 4. Execute Commands (no password needed!)
-```json
-{
-  "action": "execute",
-  "command": "ls -la"
-}
-```
-
-## 🛠️ AVAILABLE TOOLS
-
-### 📊 PostgreSQL Manager (`mcp_psql_manager`)
-- `setup_profile` - Setup connection profile (with encryption)
-- `list_profiles` - List saved profiles
-- `quick_query` - Execute SQL queries (with injection protection)
-- `show_tables` - List tables
-- `describe_table` - Table structure
-- `sample_data` - Sample data
-- `insert_data` - Insert data (with validation)
-- `update_data` - Update data (with validation)
-- `delete_data` - Delete data (with protection)
-- `database_info` - Database information
-
-### 🔐 SSH Manager (`mcp_ssh_manager`)
-- `setup_profile` - Setup connection profile (with encryption)
-- `execute` - Execute commands (with injection protection)
-- `system_info` - System information
-- `check_host` - Check host availability
-- `list_profiles` - List SSH profiles
-
-### 🌐 API Client (`mcp_api_client`)
-- `get` - GET requests (with SSRF protection)
-- `post` - POST requests (with data validation)
-- `put` - PUT requests
-- `delete` - DELETE requests
-- `patch` - PATCH requests
-- `check_api` - Check API availability
-
-## 📚 DOCUMENTATION
-
-Detailed documentation for AI agents: [mcp_config.md](mcp_config.md)
-
-## 🔄 VERSION HISTORY
-
-### v4.0.0 (Compact Names & Architecture Optimization) - CURRENT
-- ✅ **Compact Names** - 70% shorter tool names (resolves MCP filtering)
-- ✅ **Service Layer Architecture** - Professional DI-based design
-- ✅ **Performance Improvements** - 25% throughput increase
-- ✅ **God Object Elimination** - Replaced with specialized services
-- ✅ **Dependency Injection** - Modern development patterns
-- ✅ **100% API Compatibility** - All commands work unchanged
-
-### v3.0.0 (Modular Architecture)
-- ✅ **Modular Architecture** - Breaking God Object into 7 specialized modules
-- ✅ **Maximum Security** - Protection against all injection types
-- ✅ **AES-256-CBC Encryption** - Cryptographically protected passwords
-- ✅ **Comprehensive Testing** - 36 automated security tests
-- ✅ **Structured Logging** - JSON logs with importance levels
-- ✅ **Centralized Validation** - Unified data verification system
-
-### v2.0.0 (Simplified Version)
-- ✅ Profile system - password only once
-- ✅ Simple commands with minimal parameters
-- ✅ Automatic connection management
-- 🔴 Monolithic architecture (God Object 1505 lines)
-- 🔴 Limited security
-
-### v1.0.0 (Complex Version)
-- 🔴 Password in every request
-- 🔴 Complex commands with many parameters
-- 🔴 No centralized connection management
-
-## 🎯 USAGE EXAMPLES
-
-### Working with PostgreSQL
-```json
-// 1. Setup (password encrypted with AES-256-CBC)
-{
-  "action": "setup_profile",
-  "host": "localhost",
-  "username": "postgres",
-  "password": "mypass",
-  "database": "testdb"
-}
-
-// 2. View tables (with security validation)
-{
-  "action": "show_tables"
-}
-
-// 3. Execute queries (with SQL injection protection)
-{
-  "action": "quick_query",
-  "sql": "SELECT * FROM users LIMIT 5"
-}
-```
-
-### Working with SSH
-```json
-// 1. Setup SSH profile
-{
-  "action": "setup_profile",
-  "host": "myserver.com",
-  "username": "admin",
-  "password": "sshpass"
-}
-
-// 2. Execute commands (with injection protection)
-{
-  "action": "execute",
-  "command": "df -h"
-}
-
-// 3. Get system info
-{
-  "action": "system_info"
-}
-```
-
-### Working with APIs
-```json
-// 1. Simple GET request
-{
-  "action": "get",
-  "url": "https://api.example.com/users"
-}
-
-// 2. POST with data
-{
-  "action": "post",
-  "url": "https://api.example.com/users",
-  "data": {
-    "name": "John",
-    "email": "john@example.com"
-  }
-}
-
-// 3. Authenticated request
-{
-  "action": "get",
-  "url": "https://api.example.com/protected",
-  "auth_token": "your_token_here"
-}
-```
-
-## 📊 PERFORMANCE METRICS
-
-- **Initialization Time**: +20% faster
-- **Memory Usage**: -15% reduction
-- **Response Time**: +10% faster
-- **Throughput**: +25% increase
-- **Tool Name Length**: -70% reduction (81 → 27-29 chars)
-
-## 🔐 SECURITY FEATURES
-
-- **AES-256-CBC Encryption** - All passwords encrypted
-- **SQL Injection Protection** - Query validation and sanitization
-- **Command Injection Protection** - SSH command sanitization
-- **SSRF Protection** - URL validation for API requests
-- **Input Validation** - All data validated before processing
-- **Audit Logging** - All operations logged for security
-
-## 🚀 GETTING STARTED
-
-1. **Install**: `npm install`
-2. **Test**: `npm run check`
-3. **Configure**: Add to Claude Desktop config
-4. **Use**: Start with `setup_profile` actions
+## 🧪 LOCAL CHECKS
+- `npm run check` – syntax check entrypoint (`node --check`)
+- Integration tests are CLI-based: run a profile setup + action from your MCP client of choice.
 
 ## 🤝 CONTRIBUTING
-
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+3. Make your changes + add agent-facing examples
+4. Run `npm run check`
+5. Submit a PR
 
-## 📄 LICENSE
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## 🌐 LANGUAGE VERSIONS
-
-- **English** - This README
-- **Русский** - [README_RU.md](README_RU.md)
-
-## 🔗 LINKS
-
-- [Configuration Guide](mcp_config.md)
-- [Changelog](CHANGELOG.md)
-- [Security Report](EFFICIENCY_OPTIMIZATION_REPORT.md)
-- [Cleanup Report](CLEANUP_REPORT.md)
-
-## 🎉 ACKNOWLEDGMENTS
-
-Built with the Model Context Protocol SDK for seamless AI agent integration.
-
----
-
-**Ready for production use with AI agents!** 🚀 
+MIT licensed. Have fun building agent skills!

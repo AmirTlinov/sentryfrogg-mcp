@@ -77,9 +77,15 @@ class ServiceBootstrap {
       
       // Регистрация менеджеров
       await this.registerManagers();
-      
+
+      // Прогреваем профильный сервис, чтобы избежать гонок при первом запросе
+      if (this.container.has('profileService')) {
+        const profileService = this.container.get('profileService');
+        await profileService.initialize();
+      }
+
       this.initialized = true;
-      
+
       if (this.container.has('logger')) {
         const logger = this.container.get('logger');
         logger.info('Service Layer initialized successfully');
@@ -106,7 +112,10 @@ class ServiceBootstrap {
     const ProfileService = require('../services/ProfileService.cjs');
 
     // Logger (базовый сервис)
-    this.container.register('logger', () => new Logger(), { singleton: true });
+    this.container.register('logger', () => {
+      const logger = new Logger('mcp-server');
+      return logger;
+    }, { singleton: true });
 
     // Security сервис
     this.container.register('security', (logger) => new Security(logger), { 
