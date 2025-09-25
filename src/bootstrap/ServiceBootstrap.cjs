@@ -113,7 +113,7 @@ class ServiceBootstrap {
 
     // Logger (базовый сервис)
     this.container.register('logger', () => {
-      const logger = new Logger('mcp-server');
+      const logger = new Logger('sentryfrogg');
       return logger;
     }, { singleton: true });
 

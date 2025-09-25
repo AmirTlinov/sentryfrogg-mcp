@@ -1,4 +1,4 @@
-# PSQL SSH API MCP Server v4.1.0
+# SentryFrogg MCP Server v4.2.0
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-16%2B-green.svg)](https://nodejs.org/)
@@ -7,14 +7,14 @@
 > English version | [Russian version](README_RU.md)
 
 ## Overview
-The PSQL SSH API MCP Server is a lightweight service layer designed for Model Context Protocol (MCP) compatible agents that require controlled access to PostgreSQL databases, SSH targets and HTTP endpoints. The server provides a unified command surface, deterministic responses and production-grade safeguards suitable for enterprise and laboratory environments.
+SentryFrogg MCP Server provides an auditable bridge between Model Context Protocol (MCP) compatible agents and three controlled execution channels: PostgreSQL, SSH and HTTP. The service delivers deterministic responses, uniform tooling semantics and operational controls tailored for enterprise and research environments.
 
-## Release Highlights (4.1.0)
-- Consolidated bootstrap with three dedicated managers; dependency injection removed to improve transparency.
-- Persistent AES-256 profile encryption with automatic key reuse and optional external key override.
-- Consistent action payloads across PostgreSQL, SSH and HTTP managers for predictable automation.
-- Detailed telemetry hooks (`getStats()`) to support monitoring and incident response workflows.
-- Documentation and examples aligned with the current runtime and configuration defaults.
+## Release Highlights (4.2.0)
+- TLS for PostgreSQL now supports client certificates, dedicated CA bundles and hostname pinning.
+- Single bootstrap with three scoped managers; dependency injection layers removed for transparency.
+- Persistent AES-256 key management with optional external key override for profile portability.
+- Normalised action payloads across PostgreSQL, SSH and HTTP surfaces to simplify automation.
+- Telemetry hooks (`getStats()`) for service diagnostics and observability integration.
 
 ## Architecture
 ```
@@ -31,19 +31,19 @@ src/
 │   ├── Validation.cjs
 │   └── ProfileService.cjs
 ├── constants/Constants.cjs
-└── mcp_config.md              # Agent-facing cheatsheet
+└── mcp_config.md              # Agent reference sheet
 ```
-Each manager exposes a limited, audited surface area. Shared services handle logging, validation and secure profile storage.
+Each manager offers a tightly scoped interface; shared services provide logging, validation and encrypted profile storage.
 
 ## Prerequisites
-- Node.js 16 or later with npm.
-- Access to the target PostgreSQL instances, SSH hosts and HTTP endpoints.
-- Permission to persist encrypted credentials on the host running the MCP server.
+- Node.js 16 or later (npm included).
+- Credentials for the target PostgreSQL instances, SSH hosts and HTTP endpoints.
+- Permission to persist encrypted credentials on the system hosting SentryFrogg.
 
 ## Installation
 ```bash
-git clone https://github.com/yourusername/psql-ssh-api.git
-cd psql-ssh-api
+git clone https://github.com/yourusername/sentryfrogg-mcp.git
+cd sentryfrogg-mcp
 npm install
 ```
 Run a syntax check before attaching the server to an MCP client:
@@ -52,13 +52,13 @@ npm run check
 ```
 
 ## MCP Client Integration
-Example Claude Desktop configuration (Windows path notation shown for clarity):
+Claude Desktop example (Windows paths shown for clarity):
 ```json
 {
   "mcpServers": {
-    "psql-ssh-api": {
+    "sentryfrogg": {
       "command": "node",
-      "args": ["C:\\path\\to\\psql-ssh-api\\simple_openmcp_server.cjs"],
+      "args": ["C:\\path\\to\\sentryfrogg-mcp\\simple_openmcp_server.cjs"],
       "env": { "NODE_ENV": "production" }
     }
   }
@@ -66,26 +66,45 @@ Example Claude Desktop configuration (Windows path notation shown for clarity):
 ```
 
 ## Security and Compliance
-- Secrets are stored in `profiles.json` using AES-256-CBC. The encryption key is generated on first use and written to `.mcp_profiles.key` with `0600` permissions.
-- Set `ENCRYPTION_KEY` to provide a managed key or to reuse profiles across hosts. Rotate the key using organisational key-management procedures.
-- Input validation enforces required fields, command length limits and sequential execution for SSH actions to prevent race conditions.
-- Review `.mcp_profiles.key` handling before committing or distributing repository snapshots to maintain compliance with local security policies.
+- Secrets stored in `profiles.json` are encrypted with AES-256-CBC. The generated key resides in `.mcp_profiles.key` with `0600` permissions.
+- Define `ENCRYPTION_KEY` to supply a managed key or to re-use profiles across hosts. Rotate keys using your standard key-management workflow.
+- Client TLS assets (`ssl_ca`, `ssl_cert`, `ssl_key`, `ssl_passphrase`) are stored alongside passwords and encrypted by the same key hierarchy.
+- Input validation enforces required fields, command length limits and sequential SSH execution to prevent race conditions.
+- Review handling of `.mcp_profiles.key` before committing or distributing repository snapshots to maintain compliance obligations.
 
 ## Manager Interfaces
 
 ### `mcp_psql_manager`
 | Action | Purpose | Minimal payload |
 | --- | --- | --- |
-| `setup_profile` | Persist PostgreSQL credentials or a `connection_url` | `{ "action": "setup_profile", "host": "localhost", "username": "postgres", "password": "xxx", "database": "mydb" }` |
+| `setup_profile` | Persist PostgreSQL credentials or `connection_url` | `{ "action": "setup_profile", "host": "localhost", "username": "postgres", "password": "xxx", "database": "mydb" }` |
 | `list_profiles` | Return stored profiles | `{ "action": "list_profiles" }` |
-| `quick_query` | Execute SQL with optional parameters; enforces configurable limits | `{ "action": "quick_query", "sql": "SELECT * FROM users WHERE id = $1", "params": [1] }` |
-| `show_tables` | List non-system tables for the active profile | `{ "action": "show_tables" }` |
+| `quick_query` | Execute SQL with optional parameters; enforces automatic limits | `{ "action": "quick_query", "sql": "SELECT * FROM users WHERE id = $1", "params": [1] }` |
+| `show_tables` | List non-system tables | `{ "action": "show_tables" }` |
 | `describe_table` | Provide column metadata | `{ "action": "describe_table", "table_name": "users" }` |
 | `sample_data` | Retrieve representative rows with a limit | `{ "action": "sample_data", "table_name": "users", "limit": 10 }` |
 | `insert_data` | Insert JSON-formatted records | `{ "action": "insert_data", "table_name": "users", "data": { "name": "Ada" } }` |
 | `update_data` | Update rows using a SQL `where` clause | `{ "action": "update_data", "table_name": "users", "data": { "active": true }, "where": "id = 1" }` |
 | `delete_data` | Remove matching rows | `{ "action": "delete_data", "table_name": "users", "where": "id = 1" }` |
 | `database_info` | Return basic database statistics | `{ "action": "database_info" }` |
+
+**TLS options** — add these fields to `setup_profile` when the target requires mutual TLS:
+
+```jsonc
+{
+  "action": "setup_profile",
+  "profile_name": "prod",
+  "connection_url": "postgres://postgres@db.internal:5432/core?sslmode=verify-full",
+  "ssl_ca": "-----BEGIN CERTIFICATE-----...",
+  "ssl_cert": "-----BEGIN CERTIFICATE-----...",
+  "ssl_key": "-----BEGIN PRIVATE KEY-----...",
+  "ssl_passphrase": "optional",
+  "ssl_servername": "db.internal",
+  "ssl_reject_unauthorized": true
+}
+```
+
+Certificates and private keys are encrypted at rest in `profiles.json`. Use `ssl_mode` (`disable`, `require`, `verify-ca`, `verify-full`) to map to PostgreSQL expectations when not provided via `connection_url`.
 
 ### `mcp_ssh_manager`
 | Action | Purpose | Minimal payload |
@@ -100,13 +119,13 @@ Example Claude Desktop configuration (Windows path notation shown for clarity):
 | Action | Purpose | Minimal payload |
 | --- | --- | --- |
 | `get` / `post` / `put` / `delete` / `patch` | Execute HTTP requests with JSON encoding | `{ "action": "get", "url": "https://api.example.com/users" }` |
-| `check_api` | Perform a health check against an endpoint | `{ "action": "check_api", "url": "https://api.example.com/ping" }` |
+| `check_api` | Perform a health check | `{ "action": "check_api", "url": "https://api.example.com/ping" }` |
 
-Headers belong in the `headers` object; request bodies are provided via `data` and automatically serialised to JSON.
+Headers belong in the `headers` object; request bodies are supplied via `data` and serialised to JSON.
 
 ## Typical Workflow
 ```jsonc
-// 1. Save a PostgreSQL profile using a connection URL
+// 1. Register a PostgreSQL profile via connection URL
 { "action": "setup_profile", "connection_url": "postgres://postgres:postgres@localhost:5432/demo" }
 
 // 2. Inspect tables
@@ -126,14 +145,14 @@ Headers belong in the `headers` object; request bodies are provided via `data` a
 ```
 
 ## Operations
-- `npm run check` validates the server entry point.
-- Integration tests are executed through your MCP client by chaining profile setup and subsequent actions.
-- Use the `getStats()` helper on each manager to gather utilisation metrics or to integrate with observability pipelines.
+- `npm run check` validates the entry point.
+- Integration validation occurs through MCP clients by chaining profile configuration and tool execution.
+- Use `getStats()` on each manager to surface utilisation metrics or integrate with telemetry pipelines.
 
 ## Support and Contributions
 1. Fork the repository and create a dedicated feature branch.
 2. Implement the required change and include agent-facing usage examples.
-3. Run `npm run check` before submitting.
-4. Submit a pull request with a concise change summary and validation notes.
+3. Run `npm run check` before submission.
+4. Submit a pull request summarising changes and validation steps.
 
-This project is published under the MIT License. All contributions must comply with the repository’s coding and security guidelines.
+The project is distributed under the MIT License. Contributions must follow the repository coding and security guidelines.
