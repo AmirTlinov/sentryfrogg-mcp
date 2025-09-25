@@ -1,146 +1,138 @@
 #!/usr/bin/env node
 
 /**
- * 🐘 POSTGRESQL MANAGER
- * Управление PostgreSQL подключениями и запросами с безопасностью
+ * 🐘 PostgreSQL менеджер.
+ * Простой API, дружелюбный к агентам.
  */
 
+const { URL } = require('url');
 const { Pool } = require('pg');
 const Constants = require('../constants/Constants.cjs');
 
 class PostgreSQLManager {
-  constructor(logger, security, validation, profileService) {
-    this.logger = logger;
-    this.security = security;
+  constructor(logger, _security, validation, profileService) {
+    this.logger = logger.child('postgres');
     this.validation = validation;
     this.profileService = profileService;
     this.pools = new Map();
     this.stats = {
       queries: 0,
-      connections: 0,
+      pools: 0,
       errors: 0,
-      profiles_created: 0
+      profiles_created: 0,
     };
   }
 
-  // Обработка всех действий PostgreSQL
-  async handleAction(args) {
-    const { action, profile_name = 'default', ...params } = args;
-    
-    try {
-      this.logger.info('PostgreSQL action requested', { action, profile_name });
-      
-      switch (action) {
-        case 'setup_profile':
-          return await this.setupProfile(profile_name, params);
-        case 'list_profiles':
-          return await this.listProfiles();
-        case 'quick_query':
-          return await this.executeQuery(profile_name, params.sql, params.limit);
-        case 'show_tables':
-          return await this.showTables(profile_name);
-        case 'describe_table':
-          return await this.describeTable(profile_name, params.table_name);
-        case 'sample_data':
-          return await this.sampleData(profile_name, params.table_name, params.limit);
-        case 'insert_data':
-          return await this.insertData(profile_name, params.table_name, params.data);
-        case 'update_data':
-          return await this.updateData(profile_name, params.table_name, params.data, params.where);
-        case 'delete_data':
-          return await this.deleteData(profile_name, params.table_name, params.where);
-        case 'database_info':
-          return await this.getDatabaseInfo(profile_name);
-        default:
-          throw new Error(`Unknown action: ${action}`);
-      }
-    } catch (error) {
-      this.stats.errors++;
-      this.logger.error('PostgreSQL action failed', { 
-        action, 
-        profile_name, 
-        error: error.message 
-      });
-      throw error;
+  async handleAction(args = {}) {
+    const { action, profile_name = 'default' } = args;
+
+    switch (action) {
+      case 'setup_profile':
+        return this.setupProfile(profile_name, args);
+      case 'list_profiles':
+        return this.listProfiles();
+      case 'quick_query':
+        return this.executeQuery(profile_name, args.sql, args.limit, args.params);
+      case 'show_tables':
+        return this.showTables(profile_name);
+      case 'describe_table':
+        return this.describeTable(profile_name, args.table_name);
+      case 'sample_data':
+        return this.sampleData(profile_name, args.table_name, args.limit);
+      case 'insert_data':
+        return this.insertData(profile_name, args.table_name, args.data);
+      case 'update_data':
+        return this.updateData(profile_name, args.table_name, args.data, args.where);
+      case 'delete_data':
+        return this.deleteData(profile_name, args.table_name, args.where);
+      case 'database_info':
+        return this.databaseInfo(profile_name);
+      default:
+        throw new Error(`Unknown PostgreSQL action: ${action}`);
     }
   }
 
-  // Настройка профиля подключения
-  async setupProfile(profileName, params) {
+  parseConnectionUrl(connectionUrl) {
     try {
-      const { host, port = Constants.NETWORK.POSTGRES_DEFAULT_PORT, username, password, database } = params;
-      
-      if (!host || !username || !password || !database) {
-        throw new Error('Missing required parameters: host, username, password, database');
+      const url = new URL(connectionUrl);
+      if (!/^postgres(ql)?:$/.test(url.protocol)) {
+        throw new Error('Only postgres:// urls are supported');
       }
 
-      const profile = {
-        host,
-        port: parseInt(port),
+      const database = url.pathname ? url.pathname.replace(/^\//, '') : undefined;
+      const params = Object.fromEntries(url.searchParams.entries());
+
+      const username = url.username ? decodeURIComponent(url.username) : undefined;
+      const password = url.password ? decodeURIComponent(url.password) : undefined;
+
+      return {
+        host: url.hostname,
+        port: url.port ? Number(url.port) : undefined,
         username,
         password,
         database,
-        type: 'postgresql'
+        ssl: params.ssl === 'true' || params.sslmode === 'require' ? true : undefined,
       };
-
-      // Валидация профиля
-      const validation = this.validation.validateConnectionProfile(profile);
-      if (!validation.valid) {
-        throw new Error(`Profile validation failed: ${validation.errors.join(', ')}`);
-      }
-
-      // Тестирование подключения
-      await this.testConnection(profile);
-
-      // Сохранение профиля
-      await this.profileService.setProfile(profileName, profile);
-      
-      this.stats.profiles_created++;
-      this.logger.info('PostgreSQL profile created', { profileName, host, database });
-      
-      return {
-        success: true,
-        message: `PostgreSQL profile '${profileName}' created successfully`,
-        profile: { profileName, host, port, username, database }
-      };
-      
     } catch (error) {
-      this.logger.error('Failed to setup PostgreSQL profile', { 
-        profileName, 
-        error: error.message 
-      });
-      throw error;
+      throw new Error(`Failed to parse connection_url: ${error.message}`);
     }
   }
 
-  // Список профилей
+  async setupProfile(name, params) {
+    let baseConfig = {};
+    if (params.connection_url) {
+      baseConfig = this.parseConnectionUrl(params.connection_url);
+    }
+
+    const profileInput = {
+      host: params.host ?? baseConfig.host,
+      port: params.port ?? baseConfig.port,
+      username: params.username ?? baseConfig.username,
+      password: params.password ?? baseConfig.password,
+      database: params.database ?? baseConfig.database,
+    };
+
+    const validated = this.validation.ensureConnectionProfile(profileInput, {
+      requireDatabase: true,
+      defaultPort: Constants.NETWORK.POSTGRES_DEFAULT_PORT,
+      requirePassword: profileInput.password !== undefined,
+    });
+
+    const finalProfile = {
+      ...validated,
+      ssl: params.ssl ?? baseConfig.ssl ?? false,
+      type: 'postgresql',
+    };
+
+    if (params.connection_url) {
+      finalProfile.connection_url = params.connection_url;
+    }
+
+    await this.testConnection(finalProfile);
+    await this.profileService.setProfile(name, finalProfile);
+    this.stats.profiles_created += 1;
+
+    return {
+      success: true,
+      message: `PostgreSQL profile '${name}' saved`,
+      profile: {
+        name,
+        host: finalProfile.host,
+        port: finalProfile.port,
+        username: finalProfile.username,
+        database: finalProfile.database,
+        ssl: finalProfile.ssl,
+      },
+    };
+  }
+
   async listProfiles() {
-    try {
-      const profiles = await this.profileService.listProfiles();
-      const postgresProfiles = profiles.filter(p => p.type === 'postgresql');
-      
-      this.logger.debug('PostgreSQL profiles listed', { count: postgresProfiles.length });
-      
-      return {
-        success: true,
-        profiles: postgresProfiles
-      };
-      
-    } catch (error) {
-      this.logger.error('Failed to list PostgreSQL profiles', { error: error.message });
-      throw error;
-    }
+    const profiles = await this.profileService.listProfiles('postgresql');
+    return { success: true, profiles };
   }
 
-  // Получение пула подключений
-  async getPool(profileName) {
-    if (this.pools.has(profileName)) {
-      return this.pools.get(profileName);
-    }
-
-    const profile = await this.profileService.getProfile(profileName);
-    
-    const pool = new Pool({
+  buildPoolConfig(profile) {
+    return {
       host: profile.host,
       port: profile.port,
       user: profile.username,
@@ -149,388 +141,181 @@ class PostgreSQLManager {
       max: Constants.LIMITS.MAX_CONNECTIONS,
       idleTimeoutMillis: Constants.TIMEOUTS.IDLE_TIMEOUT,
       connectionTimeoutMillis: Constants.TIMEOUTS.CONNECTION_TIMEOUT,
-    });
+      ssl: profile.ssl ? { rejectUnauthorized: false } : undefined,
+    };
+  }
 
-    // Обработка ошибок пула
-    pool.on('error', (err) => {
-      this.logger.error('PostgreSQL pool error', { 
-        profileName, 
-        error: err.message 
+  async getPool(profileName) {
+    if (this.pools.has(profileName)) {
+      return this.pools.get(profileName);
+    }
+
+    const profile = await this.profileService.getProfile(profileName, 'postgresql');
+    const pool = new Pool(this.buildPoolConfig(profile));
+
+    pool.on('error', (error) => {
+      this.logger.warn('PostgreSQL pool error, recreating on next query', {
+        profile: profileName,
+        error: error.message,
       });
       this.pools.delete(profileName);
     });
 
     this.pools.set(profileName, pool);
-    this.stats.connections++;
-    
+    this.stats.pools += 1;
     return pool;
   }
 
-  // Тестирование подключения
   async testConnection(profile) {
-    const pool = new Pool({
-      host: profile.host,
-      port: profile.port,
-      user: profile.username,
-      password: profile.password,
-      database: profile.database,
-      max: 1,
-      connectionTimeoutMillis: Constants.TIMEOUTS.CONNECTION_TIMEOUT,
-    });
+    const pool = new Pool({ ...this.buildPoolConfig(profile), max: 1 });
 
     try {
       const client = await pool.connect();
       await client.query('SELECT 1');
       client.release();
+    } finally {
       await pool.end();
-      
-      this.logger.debug('PostgreSQL connection test successful', { 
-        host: profile.host, 
-        database: profile.database 
-      });
-      
-    } catch (error) {
-      await pool.end();
-      throw new Error(`Connection test failed: ${error.message}`);
     }
   }
 
-  // Выполнение SQL запроса
-  async executeQuery(profileName, sql, limit = Constants.LIMITS.DEFAULT_QUERY_LIMIT) {
+  decorateSelect(sql, limit) {
+    const trimmed = sql.trim();
+    if (/^select\s/i.test(trimmed) && !/limit\s+\d+/i.test(trimmed)) {
+      return `${trimmed} LIMIT ${limit}`;
+    }
+    return trimmed;
+  }
+
+  async executeQuery(profileName, sql, limit, params) {
+    const text = this.validation.ensureSql(sql);
+    const safeLimit = this.validation.ensureLimit(limit);
+    const queryText = this.decorateSelect(text, safeLimit);
+    const values = Array.isArray(params) ? params : undefined;
+
     try {
-      if (!sql || typeof sql !== 'string') {
-        throw new Error('SQL query is required');
-      }
-
-      // Валидация SQL
-      const validation = this.validation.validateSqlQuery(sql);
-      if (!validation.valid) {
-        throw new Error(`SQL validation failed: ${validation.errors.join(', ')}`);
-      }
-
-      // Валидация лимита
-      const limitValidation = this.validation.validateLimit(limit);
-      if (!limitValidation.valid) {
-        throw new Error(`Limit validation failed: ${limitValidation.errors.join(', ')}`);
-      }
-
       const pool = await this.getPool(profileName);
-      
-      // Добавление LIMIT для SELECT запросов
-      let finalSql = sql;
-      if (sql.toUpperCase().trim().startsWith('SELECT') && !sql.toUpperCase().includes('LIMIT')) {
-        // Нормализация SQL: убираем переносы строк и точки с запятой в конце
-        const normalizedSql = sql.trim().replace(/\s+/g, ' ').replace(/;$/, '');
-        finalSql = `${normalizedSql} LIMIT ${limit}`;
-      }
-
-      const result = await pool.query(finalSql);
-      this.stats.queries++;
-      
-      this.logger.info('PostgreSQL query executed', { 
-        profileName, 
-        rowCount: result.rowCount,
-        command: result.command 
-      });
-      
+      const result = values ? await pool.query(queryText, values) : await pool.query(queryText);
+      this.stats.queries += 1;
       return {
         success: true,
         command: result.command,
         rowCount: result.rowCount,
         rows: result.rows,
-        fields: result.fields?.map(f => ({ name: f.name, type: f.dataTypeID })) || []
+        fields: result.fields?.map((f) => ({ name: f.name, dataTypeId: f.dataTypeID })),
       };
-      
     } catch (error) {
-      this.logger.error('PostgreSQL query failed', { 
-        profileName, 
-        sql: sql?.substring(0, Constants.LIMITS.LOG_SUBSTRING_LENGTH), 
-        error: error.message 
-      });
+      this.stats.errors += 1;
+      this.logger.error('Query failed', { profile: profileName, error: error.message });
       throw error;
     }
   }
 
-  // Показать таблицы
   async showTables(profileName) {
     const sql = `
-      SELECT 
-        schemaname as schema,
-        tablename as table,
-        tableowner as owner,
-        hasindexes as has_indexes,
-        hasrules as has_rules,
-        hastriggers as has_triggers
-      FROM pg_tables 
-      WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
+      SELECT schemaname AS schema,
+             tablename AS name,
+             tableowner AS owner,
+             hasindexes,
+             hasrules,
+             hastriggers
+      FROM pg_tables
+      WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
       ORDER BY schemaname, tablename
     `;
-    
-    return await this.executeQuery(profileName, sql);
+    return this.executeQuery(profileName, sql);
   }
 
-  // Описание таблицы
   async describeTable(profileName, tableName) {
-    if (!tableName) {
-      throw new Error('Table name is required');
-    }
+    const name = this.validation.ensureTableName(tableName);
+    const pool = await this.getPool(profileName);
+    const result = await pool.query(
+      `SELECT column_name,
+              data_type,
+              is_nullable,
+              column_default,
+              character_maximum_length,
+              numeric_precision,
+              numeric_scale
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = $1
+       ORDER BY ordinal_position`,
+      [name]
+    );
 
-    // Валидация имени таблицы
-    const validation = this.validation.validateTableName(tableName);
-    if (!validation.valid) {
-      throw new Error(`Table name validation failed: ${validation.errors.join(', ')}`);
-    }
-
-    const sql = `
-      SELECT 
-        column_name,
-        data_type,
-        is_nullable,
-        column_default,
-        character_maximum_length,
-        numeric_precision,
-        numeric_scale
-      FROM information_schema.columns 
-      WHERE table_name = $1
-      ORDER BY ordinal_position
-    `;
-    
-    try {
-      const pool = await this.getPool(profileName);
-      const result = await pool.query(sql, [tableName]);
-      
-      this.stats.queries++;
-      
-      return {
-        success: true,
-        table: tableName,
-        columns: result.rows
-      };
-      
-    } catch (error) {
-      this.logger.error('Failed to describe table', { 
-        profileName, 
-        tableName, 
-        error: error.message 
-      });
-      throw error;
-    }
+    this.stats.queries += 1;
+    return { success: true, table: name, columns: result.rows };
   }
 
-  // Получить образец данных
-  async sampleData(profileName, tableName, limit = Constants.LIMITS.SAMPLE_DATA_LIMIT) {
-    if (!tableName) {
-      throw new Error('Table name is required');
-    }
-
-    // Валидация имени таблицы
-    const validation = this.validation.validateTableName(tableName);
-    if (!validation.valid) {
-      throw new Error(`Table name validation failed: ${validation.errors.join(', ')}`);
-    }
-
-    // Валидация лимита
-    const limitValidation = this.validation.validateLimit(limit);
-    if (!limitValidation.valid) {
-      throw new Error(`Limit validation failed: ${limitValidation.errors.join(', ')}`);
-    }
-
-    const sql = `SELECT * FROM ${tableName} LIMIT $1`;
-    
-    try {
-      const pool = await this.getPool(profileName);
-      const result = await pool.query(sql, [limit]);
-      
-      this.stats.queries++;
-      
-      return {
-        success: true,
-        table: tableName,
-        sample_size: result.rows.length,
-        data: result.rows
-      };
-      
-    } catch (error) {
-      this.logger.error('Failed to get sample data', { 
-        profileName, 
-        tableName, 
-        error: error.message 
-      });
-      throw error;
-    }
+  async sampleData(profileName, tableName, limit) {
+    const name = this.validation.ensureTableName(tableName);
+    const safeLimit = this.validation.ensureLimit(limit, Constants.LIMITS.SAMPLE_DATA_LIMIT);
+    const pool = await this.getPool(profileName);
+    const sql = `SELECT * FROM ${name} LIMIT $1`;
+    const result = await pool.query(sql, [safeLimit]);
+    this.stats.queries += 1;
+    return { success: true, table: name, sample_size: result.rowCount, rows: result.rows };
   }
 
-  // Вставка данных
   async insertData(profileName, tableName, data) {
-    if (!tableName || !data) {
-      throw new Error('Table name and data are required');
-    }
+    const name = this.validation.ensureTableName(tableName);
+    const payload = this.validation.ensureDataObject(data);
 
-    // Валидация имени таблицы
-    const tableValidation = this.validation.validateTableName(tableName);
-    if (!tableValidation.valid) {
-      throw new Error(`Table name validation failed: ${tableValidation.errors.join(', ')}`);
-    }
+    const columns = Object.keys(payload);
+    const values = Object.values(payload);
+    const placeholders = columns.map((_, index) => `$${index + 1}`);
+    const sql = `INSERT INTO ${name} (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING *`;
 
-    // Валидация данных
-    const dataValidation = this.validation.validateInsertData(data);
-    if (!dataValidation.valid) {
-      throw new Error(`Data validation failed: ${dataValidation.errors.join(', ')}`);
-    }
-
-    const columns = Object.keys(data);
-    const values = Object.values(data);
-    const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
-    
-    const sql = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders}) RETURNING *`;
-    
-    try {
-      const pool = await this.getPool(profileName);
-      const result = await pool.query(sql, values);
-      
-      this.stats.queries++;
-      
-      return {
-        success: true,
-        table: tableName,
-        inserted: result.rows[0],
-        rowCount: result.rowCount
-      };
-      
-    } catch (error) {
-      this.logger.error('Failed to insert data', { 
-        profileName, 
-        tableName, 
-        error: error.message 
-      });
-      throw error;
-    }
+    const pool = await this.getPool(profileName);
+    const result = await pool.query(sql, values);
+    this.stats.queries += 1;
+    return { success: true, table: name, row: result.rows[0], rowCount: result.rowCount };
   }
 
-  // Обновление данных
   async updateData(profileName, tableName, data, where) {
-    if (!tableName || !data || !where) {
-      throw new Error('Table name, data, and where clause are required');
-    }
+    const name = this.validation.ensureTableName(tableName);
+    const payload = this.validation.ensureDataObject(data);
+    const whereClause = this.validation.ensureWhereClause(where);
 
-    // Валидация имени таблицы
-    const tableValidation = this.validation.validateTableName(tableName);
-    if (!tableValidation.valid) {
-      throw new Error(`Table name validation failed: ${tableValidation.errors.join(', ')}`);
-    }
+    const columns = Object.keys(payload);
+    const values = Object.values(payload);
+    const assignments = columns.map((col, index) => `${col} = $${index + 1}`);
+    const sql = `UPDATE ${name} SET ${assignments.join(', ')} WHERE ${whereClause} RETURNING *`;
 
-    // Валидация данных
-    const dataValidation = this.validation.validateInsertData(data);
-    if (!dataValidation.valid) {
-      throw new Error(`Data validation failed: ${dataValidation.errors.join(', ')}`);
-    }
-
-    const columns = Object.keys(data);
-    const values = Object.values(data);
-    const setClause = columns.map((col, index) => `${col} = $${index + 1}`).join(', ');
-    
-    const sql = `UPDATE ${tableName} SET ${setClause} WHERE ${where} RETURNING *`;
-    
-    try {
-      const pool = await this.getPool(profileName);
-      const result = await pool.query(sql, values);
-      
-      this.stats.queries++;
-      
-      return {
-        success: true,
-        table: tableName,
-        updated: result.rows,
-        rowCount: result.rowCount
-      };
-      
-    } catch (error) {
-      this.logger.error('Failed to update data', { 
-        profileName, 
-        tableName, 
-        error: error.message 
-      });
-      throw error;
-    }
+    const pool = await this.getPool(profileName);
+    const result = await pool.query(sql, values);
+    this.stats.queries += 1;
+    return { success: true, table: name, rows: result.rows, rowCount: result.rowCount };
   }
 
-  // Удаление данных
   async deleteData(profileName, tableName, where) {
-    if (!tableName || !where) {
-      throw new Error('Table name and where clause are required');
-    }
+    const name = this.validation.ensureTableName(tableName);
+    const whereClause = this.validation.ensureWhereClause(where);
 
-    // Валидация имени таблицы
-    const tableValidation = this.validation.validateTableName(tableName);
-    if (!tableValidation.valid) {
-      throw new Error(`Table name validation failed: ${tableValidation.errors.join(', ')}`);
-    }
-
-    const sql = `DELETE FROM ${tableName} WHERE ${where}`;
-    
-    try {
-      const pool = await this.getPool(profileName);
-      const result = await pool.query(sql);
-      
-      this.stats.queries++;
-      
-      return {
-        success: true,
-        table: tableName,
-        deleted: result.rowCount
-      };
-      
-    } catch (error) {
-      this.logger.error('Failed to delete data', { 
-        profileName, 
-        tableName, 
-        error: error.message 
-      });
-      throw error;
-    }
+    const sql = `DELETE FROM ${name} WHERE ${whereClause}`;
+    const pool = await this.getPool(profileName);
+    const result = await pool.query(sql);
+    this.stats.queries += 1;
+    return { success: true, table: name, rowCount: result.rowCount };
   }
 
-  // Информация о базе данных
-  async getDatabaseInfo(profileName) {
-    const sql = `
-      SELECT 
-        current_database() as database_name,
-        current_user as current_user,
-        version() as version,
-        pg_size_pretty(pg_database_size(current_database())) as size
-    `;
-    
-    return await this.executeQuery(profileName, sql);
+  async databaseInfo(profileName) {
+    const sql = `SELECT current_database() AS database_name,
+                        current_user AS current_user,
+                        version() AS version,
+                        pg_size_pretty(pg_database_size(current_database())) AS size`;
+    return this.executeQuery(profileName, sql);
   }
 
-  // Получение статистики
   getStats() {
-    return {
-      ...this.stats,
-      active_pools: this.pools.size
-    };
+    return { ...this.stats, activePools: this.pools.size };
   }
 
-  // Очистка ресурсов
   async cleanup() {
-    try {
-      for (const [profileName, pool] of this.pools) {
-        await pool.end();
-        this.logger.debug('PostgreSQL pool closed', { profileName });
-      }
-      
-      this.pools.clear();
-      this.logger.info('PostgreSQL manager cleaned up');
-      
-    } catch (error) {
-      this.logger.error('Failed to cleanup PostgreSQL manager', { error: error.message });
-      throw error;
+    for (const pool of this.pools.values()) {
+      await pool.end();
     }
+    this.pools.clear();
   }
 }
 
-function createPostgreSQLManager(logger, security, validation, profileService) {
-  return new PostgreSQLManager(logger, security, validation, profileService);
-}
-
-module.exports = PostgreSQLManager; 
+module.exports = PostgreSQLManager;
