@@ -1,7 +1,7 @@
 {
-  "name": "psql-ssh-api",
-  "version": "4.1.0",
-  "description": "🚀 Compact MCP server for PostgreSQL, SSH and HTTP with agent-first ergonomics",
+  "name": "sentryfrogg-mcp",
+  "version": "4.2.0",
+  "description": "Enterprise MCP server for PostgreSQL, SSH and HTTP operations under the SentryFrogg brand",
   "main": "simple_openmcp_server.cjs",
   "type": "commonjs",
   "scripts": {
@@ -48,12 +48,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/your-username/psql-ssh-api.git"
+    "url": "git+https://github.com/your-username/sentryfrogg-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/your-username/psql-ssh-api/issues"
+    "url": "https://github.com/your-username/sentryfrogg-mcp/issues"
   },
-  "homepage": "https://github.com/your-username/psql-ssh-api#readme",
+  "homepage": "https://github.com/your-username/sentryfrogg-mcp#readme",
   "files": [
     "simple_openmcp_server.cjs",
     "src/",
@@ -90,4 +90,4 @@
       "http"
     ]
   }
-} 
+}

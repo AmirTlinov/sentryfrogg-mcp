@@ -9,7 +9,7 @@ const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const DEFAULT_LEVEL = process.env.LOG_LEVEL?.toLowerCase() || 'info';
 
 class Logger {
-  constructor(context = 'mcp-server', level = DEFAULT_LEVEL) {
+  constructor(context = 'sentryfrogg', level = DEFAULT_LEVEL) {
     this.context = context;
     this.level = LEVELS[level] !== undefined ? level : 'info';
     this.counters = { error: 0, warn: 0, info: 0, debug: 0 };

@@ -13,7 +13,7 @@ class ProfileService {
     this.security = security;
     this.filePath = path.join(process.cwd(), 'profiles.json');
     this.profiles = new Map();
-    this.secretFields = ['password', 'private_key', 'passphrase', 'token'];
+    this.secretFields = ['password', 'private_key', 'passphrase', 'token', 'ssl_ca', 'ssl_cert', 'ssl_key', 'ssl_passphrase'];
     this.stats = {
       created: 0,
       updated: 0,

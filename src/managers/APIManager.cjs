@@ -50,7 +50,7 @@ class APIManager {
   buildHeaders(rawHeaders, authToken, hasBody) {
     const headers = this.validation.ensureHeaders(rawHeaders);
     const finalHeaders = {
-      'User-Agent': 'mcp-api-client/4.1.0',
+      'User-Agent': 'mcp-api-client/4.2.0',
       Accept: 'application/json, text/plain, */*',
       ...headers,
     };

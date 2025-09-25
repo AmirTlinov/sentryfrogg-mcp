@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// 🚀 POSTGRESQL + API + SSH MCP СЕРВЕР v4.1
+// SentryFrogg MCP Server v4.2
 
 process.on('unhandledRejection', (reason, promise) => {
   process.stderr.write(`🔥 Unhandled Promise Rejection: ${reason}\n`);
@@ -38,7 +38,14 @@ const toolCatalog = [
         username: { type: 'string' },
         password: { type: 'string' },
         database: { type: 'string' },
-        ssl: { type: 'boolean' },
+        ssl: { type: ['boolean', 'object'] },
+        ssl_mode: { type: 'string', description: 'disable | require | verify-ca | verify-full' },
+        ssl_ca: { type: 'string', description: 'PEM encoded certificate authority chain' },
+        ssl_cert: { type: 'string', description: 'PEM encoded client certificate' },
+        ssl_key: { type: 'string', description: 'PEM encoded client private key' },
+        ssl_passphrase: { type: 'string', description: 'Optional passphrase for the private key' },
+        ssl_servername: { type: 'string', description: 'Override servername for TLS verification' },
+        ssl_reject_unauthorized: { type: ['boolean', 'string'], description: 'Set to false to trust self-signed certificates' },
         sql: { type: 'string' },
         params: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
         table_name: { type: 'string' },
@@ -87,12 +94,12 @@ const toolCatalog = [
   }
 ];
 
-class MCPServer {
+class SentryFroggServer {
   constructor() {
     this.server = new Server(
       {
-        name: 'psql-ssh-api',
-        version: '4.1.0',
+        name: 'sentryfrogg',
+        version: '4.2.0',
       },
       {
         capabilities: {
@@ -110,9 +117,9 @@ class MCPServer {
       await this.setupHandlers();
       this.initialized = true;
       const logger = this.container.get('logger');
-      logger.info('MCP Server v4.1.0 ready');
+      logger.info('SentryFrogg MCP Server v4.2.0 ready');
     } catch (error) {
-      process.stderr.write(`Failed to initialize MCP Server: ${error.message}\n`);
+      process.stderr.write(`Failed to initialize SentryFrogg MCP Server: ${error.message}\n`);
       throw error;
     }
   }
@@ -177,7 +184,7 @@ class MCPServer {
 
   ensureInitialized() {
     if (!this.initialized) {
-      throw new Error('MCP Server not initialized');
+      throw new Error('SentryFrogg MCP Server not initialized');
     }
   }
 
@@ -211,7 +218,7 @@ class MCPServer {
     }
 
     return {
-      version: '4.1.0',
+      version: '4.2.0',
       architecture: 'lightweight-service-layer',
       ...ServiceBootstrap.getStats(),
     };
@@ -219,11 +226,11 @@ class MCPServer {
 }
 
 if (require.main === module) {
-  const server = new MCPServer();
+  const server = new SentryFroggServer();
   server.run().catch((error) => {
     process.stderr.write(`Server run failed: ${error.message}\n`);
     process.exit(1);
   });
 }
 
-module.exports = MCPServer;
+module.exports = SentryFroggServer;

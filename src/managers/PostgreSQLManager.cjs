@@ -71,11 +71,71 @@ class PostgreSQLManager {
         username,
         password,
         database,
-        ssl: params.ssl === 'true' || params.sslmode === 'require' ? true : undefined,
+        ...this.parseSslParams(params, url.hostname),
       };
     } catch (error) {
       throw new Error(`Failed to parse connection_url: ${error.message}`);
     }
+  }
+
+  parseSslParams(params, hostFromUrl) {
+    const sslParams = {};
+
+    const sslFlags = new Set([
+      'true',
+      '1',
+      'require',
+      'verify-ca',
+      'verify-full',
+    ]);
+
+    const sslEnv = params.ssl?.toLowerCase();
+    const sslMode = params.sslmode?.toLowerCase();
+
+    if (sslEnv && sslFlags.has(sslEnv)) {
+      sslParams.ssl = { enabled: true };
+    }
+
+    if (sslMode) {
+      sslParams.ssl = sslParams.ssl || { enabled: true };
+      sslParams.ssl.mode = sslMode;
+    }
+
+    if (params.sslrejectunauthorized) {
+      sslParams.ssl = sslParams.ssl || { enabled: true };
+      sslParams.ssl.rejectUnauthorized = params.sslrejectunauthorized !== 'false';
+    }
+
+    if (params.sslservername) {
+      sslParams.ssl = sslParams.ssl || { enabled: true };
+      sslParams.ssl.servername = params.sslservername;
+    }
+
+    if (params.sslrootcert) {
+      sslParams.ssl_ca = params.sslrootcert;
+      sslParams.ssl = sslParams.ssl || { enabled: true };
+    }
+
+    if (params.sslcert) {
+      sslParams.ssl_cert = params.sslcert;
+      sslParams.ssl = sslParams.ssl || { enabled: true };
+    }
+
+    if (params.sslkey) {
+      sslParams.ssl_key = params.sslkey;
+      sslParams.ssl = sslParams.ssl || { enabled: true };
+    }
+
+    if (params.sslpassword) {
+      sslParams.ssl_passphrase = params.sslpassword;
+      sslParams.ssl = sslParams.ssl || { enabled: true };
+    }
+
+    if (sslParams.ssl && !sslParams.ssl.servername && sslParams.ssl.mode === 'verify-full') {
+      sslParams.ssl.servername = hostFromUrl;
+    }
+
+    return sslParams;
   }
 
   async setupProfile(name, params) {
@@ -98,15 +158,19 @@ class PostgreSQLManager {
       requirePassword: profileInput.password !== undefined,
     });
 
+    const { ssl, secrets: sslSecrets } = this.normalizeSslSettings(params, baseConfig);
+
     const finalProfile = {
       ...validated,
-      ssl: params.ssl ?? baseConfig.ssl ?? false,
+      ssl,
       type: 'postgresql',
     };
 
     if (params.connection_url) {
       finalProfile.connection_url = params.connection_url;
     }
+
+    Object.assign(finalProfile, sslSecrets);
 
     await this.testConnection(finalProfile);
     await this.profileService.setProfile(name, finalProfile);
@@ -141,8 +205,156 @@ class PostgreSQLManager {
       max: Constants.LIMITS.MAX_CONNECTIONS,
       idleTimeoutMillis: Constants.TIMEOUTS.IDLE_TIMEOUT,
       connectionTimeoutMillis: Constants.TIMEOUTS.CONNECTION_TIMEOUT,
-      ssl: profile.ssl ? { rejectUnauthorized: false } : undefined,
+      ssl: this.buildSslConfig(profile),
     };
+  }
+
+  normalizeSslSettings(params, baseConfig) {
+    const directSsl = params.ssl;
+    const baseSsl = baseConfig.ssl;
+
+    const secrets = {};
+
+    const collectSecret = (key, value) => {
+      if (value === undefined || value === null || value === '') {
+        return;
+      }
+      secrets[key] = value;
+    };
+
+    const merged = {
+      mode: params.ssl_mode ?? baseSsl?.mode,
+      rejectUnauthorized: params.ssl_reject_unauthorized ?? baseSsl?.rejectUnauthorized,
+      servername: params.ssl_servername ?? baseSsl?.servername,
+    };
+
+    collectSecret('ssl_ca', params.ssl_ca ?? baseConfig.ssl_ca);
+    collectSecret('ssl_cert', params.ssl_cert ?? baseConfig.ssl_cert);
+    collectSecret('ssl_key', params.ssl_key ?? baseConfig.ssl_key);
+    collectSecret('ssl_passphrase', params.ssl_passphrase ?? baseConfig.ssl_passphrase);
+
+    let enabled = false;
+
+    if (typeof directSsl === 'boolean') {
+      enabled = directSsl;
+    } else if (typeof directSsl === 'string') {
+      const lowered = directSsl.toLowerCase();
+      enabled = ['true', '1', 'require', 'verify-ca', 'verify-full'].includes(lowered);
+      if (!merged.mode && ['require', 'verify-ca', 'verify-full'].includes(lowered)) {
+        merged.mode = lowered;
+      }
+    } else if (typeof directSsl === 'object' && directSsl) {
+      enabled = directSsl.enabled ?? true;
+      merged.mode = directSsl.mode ?? merged.mode;
+      if (directSsl.rejectUnauthorized !== undefined) {
+        merged.rejectUnauthorized = directSsl.rejectUnauthorized;
+      }
+      merged.servername = directSsl.servername ?? merged.servername;
+      collectSecret('ssl_ca', directSsl.ca ?? directSsl.rootCert);
+      collectSecret('ssl_cert', directSsl.cert);
+      collectSecret('ssl_key', directSsl.key);
+      collectSecret('ssl_passphrase', directSsl.passphrase);
+    }
+
+    if (typeof baseSsl === 'boolean') {
+      enabled = enabled || baseSsl;
+    } else if (typeof baseSsl === 'object' && baseSsl) {
+      const baseEnabled = baseSsl.enabled !== undefined ? baseSsl.enabled : true;
+      enabled = enabled || baseEnabled;
+      merged.mode = merged.mode ?? baseSsl.mode;
+      if (baseSsl.rejectUnauthorized !== undefined) {
+        merged.rejectUnauthorized = merged.rejectUnauthorized ?? baseSsl.rejectUnauthorized;
+      }
+      merged.servername = merged.servername ?? baseSsl.servername;
+      collectSecret('ssl_ca', baseSsl.ca ?? baseSsl.rootCert);
+      collectSecret('ssl_cert', baseSsl.cert);
+      collectSecret('ssl_key', baseSsl.key);
+      collectSecret('ssl_passphrase', baseSsl.passphrase);
+    }
+
+    if (!enabled && Object.keys(secrets).length > 0) {
+      enabled = true;
+    }
+
+    if (merged.mode) {
+      const mode = merged.mode.toLowerCase();
+      if (mode === 'disable') {
+        enabled = false;
+      } else if (mode === 'require') {
+        enabled = true;
+        merged.rejectUnauthorized = false;
+      } else if (mode === 'verify-ca' || mode === 'verifyfull' || mode === 'verify-full') {
+        enabled = true;
+        merged.rejectUnauthorized = true;
+        if (!merged.servername && mode.startsWith('verify')) {
+          merged.servername = params.host ?? baseConfig.host;
+        }
+      }
+    }
+
+    if (!enabled) {
+      return { ssl: false, secrets };
+    }
+
+    if (merged.rejectUnauthorized === undefined) {
+      merged.rejectUnauthorized = true;
+    } else if (typeof merged.rejectUnauthorized === 'string') {
+      merged.rejectUnauthorized = !['false', '0', 'no'].includes(merged.rejectUnauthorized.toLowerCase());
+    }
+
+    return {
+      ssl: {
+        enabled: true,
+        mode: merged.mode,
+        rejectUnauthorized: merged.rejectUnauthorized,
+        servername: merged.servername,
+      },
+      secrets,
+    };
+  }
+
+  buildSslConfig(profile) {
+    const ssl = profile.ssl;
+    if (!ssl || ssl === false) {
+      return undefined;
+    }
+
+    if (ssl.enabled === false) {
+      return undefined;
+    }
+
+    const config = {};
+
+    const rejectUnauthorized = ssl.rejectUnauthorized;
+    if (rejectUnauthorized !== undefined) {
+      config.rejectUnauthorized = !!rejectUnauthorized;
+    }
+
+    if (ssl.servername) {
+      config.servername = ssl.servername;
+    }
+
+    if (profile.ssl_ca) {
+      config.ca = profile.ssl_ca;
+    }
+
+    if (profile.ssl_cert) {
+      config.cert = profile.ssl_cert;
+    }
+
+    if (profile.ssl_key) {
+      config.key = profile.ssl_key;
+    }
+
+    if (profile.ssl_passphrase) {
+      config.passphrase = profile.ssl_passphrase;
+    }
+
+    if (Object.keys(config).length === 0) {
+      return true;
+    }
+
+    return config;
   }
 
   async getPool(profileName) {
