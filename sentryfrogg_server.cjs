@@ -26,7 +26,7 @@ const ServiceBootstrap = require('./src/bootstrap/ServiceBootstrap.cjs');
 const toolCatalog = [
   {
     name: 'mcp_psql_manager',
-    description: '🐘 PostgreSQL manager: setup_profile · list_profiles · quick_query · show_tables · describe_table · sample_data · insert_data · update_data · delete_data · database_info',
+    description: 'PostgreSQL toolchain. Flow: setup_profile → action. setup_profile accepts credentials or connection_url plus optional TLS (ssl_mode, ssl_ca, ssl_cert, ssl_key, ssl_passphrase, ssl_servername, ssl_reject_unauthorized); secrets stored encrypted. Subsequent calls reuse profile_name: quick_query (adds LIMIT 100 if absent; supports params array for $ placeholders), show_tables, describe_table, sample_data, database_info, insert_data, update_data, delete_data, list_profiles.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -58,7 +58,7 @@ const toolCatalog = [
   },
   {
     name: 'mcp_ssh_manager',
-    description: '🔐 SSH manager: setup_profile · list_profiles · execute · system_info · check_host (password or private_key)',
+    description: 'SSH executor. setup_profile stores host credentials (password or PEM private_key with optional passphrase); data encrypted. list_profiles enumerates profiles, system_info returns collected facts, check_host validates reachability, execute runs one trimmed command (pipes/redirects allowed) sequentially per profile; no concurrent runs.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -79,7 +79,7 @@ const toolCatalog = [
   },
   {
     name: 'mcp_api_client',
-    description: '🌐 HTTP client: get · post · put · delete · patch · check_api (accepts local URLs)',
+    description: 'HTTP caller. Fields: action ∈ {get, post, put, delete, patch, check_api}, url (required), data (JSON body for mutating verbs), headers (string map), auth_token (prefixed into Authorization unless headers.Authorization supplied). Local URLs allowed. Responses are structured results or MCP errors.',
     inputSchema: {
       type: 'object',
       properties: {
