@@ -9,6 +9,10 @@
 
 > **Specifically designed for AI agents** - Service Layer architecture, maximum security, short names!
 
+<a href="https://glama.ai/mcp/servers/@iMAGRAY/PSQL_SSH_API_MCP">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@iMAGRAY/PSQL_SSH_API_MCP/badge" alt="PostgreSQL API SSH Server MCP server" />
+</a>
+
 ## 🎯 KEY ADVANTAGES v4.0.0
 
 - ✅ **Service Layer Architecture** - Professional DI-based modular design
@@ -323,4 +327,4 @@ Built with the Model Context Protocol SDK for seamless AI agent integration.
 
 ---
 
-**Ready for production use with AI agents!** 🚀 
+**Ready for production use with AI agents!** 🚀
