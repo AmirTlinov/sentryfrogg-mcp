@@ -33,10 +33,7 @@
     "security",
     "validation"
   ],
-  "author": {
-    "name": "MCP Developer",
-    "email": "developer@mcp-servers.com"
-  },
+  "author": "AmirTlinov",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.20.1",
@@ -45,17 +42,17 @@
     "ssh2": "^1.15.0"
   },
   "engines": {
-    "node": ">=16.0.0",
+    "node": ">=18.0.0",
     "npm": ">=8.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/iMAGRAY/SentryFrogg-MCP.git"
+    "url": "git+https://github.com/AmirTlinov/SentryFrogg-MCP.git"
   },
   "bugs": {
-    "url": "https://github.com/iMAGRAY/SentryFrogg-MCP/issues"
+    "url": "https://github.com/AmirTlinov/SentryFrogg-MCP/issues"
   },
-  "homepage": "https://github.com/iMAGRAY/SentryFrogg-MCP#readme",
+  "homepage": "https://github.com/AmirTlinov/SentryFrogg-MCP#readme",
   "files": [
     "sentryfrogg_server.cjs",
     "src/",
@@ -77,10 +74,6 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
-  },
-  "funding": {
-    "type": "github",
-    "url": "https://github.com/sponsors/your-username"
   },
   "config": {
     "mcp_version": "1.0",

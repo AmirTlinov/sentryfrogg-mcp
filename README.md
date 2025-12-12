@@ -1,16 +1,31 @@
 # SentryFrogg MCP Server v4.2.0
 
+[Русская версия](README_RU.md) • [MCP configuration](mcp_config.md) • [Integration stack](integration/README.md) • [Changelog](CHANGELOG.md)
+
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Node.js >=18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+[![CI](https://github.com/AmirTlinov/SentryFrogg-MCP/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/AmirTlinov/SentryFrogg-MCP/actions/workflows/ci.yml)
+
 ## Document Profile
 | Field | Value |
 | --- | --- |
 | Product | SentryFrogg MCP Server |
 | Version | 4.2.0 |
-| Runtime | Node.js ≥ 16 |
+| Runtime | Node.js ≥ 18 |
 | Interfaces | Model Context Protocol (PostgreSQL · SSH · HTTP) |
 | License | MIT |
 
 ## Executive Synopsis
 SentryFrogg MCP Server supplies a governed command plane for MCP-compatible agents that operate data platforms, remote shells and web services. The implementation prioritises deterministic behaviour, encrypted credential storage and prescriptive workflows so that autonomous agents can execute infrastructure tasks with enterprise auditability.
+
+## Quick Start
+1. Install dependencies: `npm install`
+2. Register the server in your MCP client (stdio): see [mcp_config.md](mcp_config.md)
+3. Start the server: `npm start`
+4. In your MCP client, call `help`, then `setup_profile` for PostgreSQL/SSH (the HTTP client is stateless)
+
+Notes:
+- Server logs are written to **stderr** to keep MCP stdout clean.
 
 ## Functional Surface
 | Capability | Detail |
@@ -87,11 +102,14 @@ SentryFrogg MCP Server supplies a governed command plane for MCP-compatible agen
 ## Installation and Operations
 | Task | Command |
 | --- | --- |
-| Clone and install | `git clone https://github.com/iMAGRAY/SentryFrogg-MCP.git && cd SentryFrogg-MCP && npm install` |
+| Clone and install | `git clone https://github.com/AmirTlinov/SentryFrogg-MCP.git && cd SentryFrogg-MCP && npm install` |
+| Start (stdio) | `npm start` |
 | Syntax check | `npm run check` |
-| Launch (stdio) | `node sentryfrogg_server.cjs` |
-| Update dependencies | `npm install --package-lock-only && npm audit fix --only=prod` (subject to governance) |
-| Reset profile store | Remove `profiles.json` (it is gitignored) after confirming backups |
+| Unit tests | `npm test` |
+| Start integration targets (Docker) | `docker compose -f integration/docker-compose.yml up -d --build` |
+| Integration smoke test | `npm run smoke` |
+| Stop integration targets | `docker compose -f integration/docker-compose.yml down -v` |
+| Reset local profile store | Remove `profiles.json` and `.mcp_profiles.key` after confirming backups |
 
 ## Security & Compliance
 - Encryption key lifecycle: `.mcp_profiles.key` generated on first run; override via `ENCRYPTION_KEY` for coordinated environments.  
@@ -99,6 +117,8 @@ SentryFrogg MCP Server supplies a governed command plane for MCP-compatible agen
 - Input governance: SQL statements, SSH commands and HTTP payloads are length-limited; oversized inputs are rejected pre-execution.  
 - Audit trail: stderr logging captures timestamped events per tool to support collection by SIEM platforms.  
 - Dependency governance: locked versions of `pg`, `ssh2`, `node-fetch`, `@modelcontextprotocol/sdk`; monitor advisories for patch cadence.
+- Vulnerability reporting: see [SECURITY.md](SECURITY.md).
+- Public release checklist: see [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md).
 
 ## Troubleshooting Matrix
 | Symptom | Diagnostic Actions | Remediation |
@@ -112,22 +132,10 @@ SentryFrogg MCP Server supplies a governed command plane for MCP-compatible agen
 Consult [CHANGELOG.md](CHANGELOG.md) for a dated record of functional and operational updates, including TLS support and renaming.
 
 ## Contribution & Support
-- Submit changes through pull requests accompanied by verification evidence (`npm run check`).  
-- Never commit `.mcp_profiles.key` or environment-specific secrets.  
-- Use maintainer contact information in `package.json` for escalation or integration assistance.
+- See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and style expectations.  
+- Security issues: follow [SECURITY.md](SECURITY.md).  
+- Community standards: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
-## Quick Start Checklist
-| Step | Action |
-| --- | --- |
-| 1 | `git remote set-url origin https://github.com/iMAGRAY/SentryFrogg-MCP.git` (align local remote). |
-| 2 | Copy `profiles.example.json` → `profiles.json` and adjust host-specific settings. |
-| 3 | Run `node sentryfrogg_server.cjs` from the project root (or allow MCP host to spawn it). |
-| 4 | In the MCP client, call `setup_profile` for each tool before issuing operational commands. |
-| 5 | Execute `npm run check` prior to commits; extend with integration tests as they are introduced. |
-
-## Testing Roadmap
-- `npm test` выполняет встроенные unit-тесты менеджеров и smoke-тест `STDIO handshake returns initialize response and tools list`, который поднимает сервер через STDIO и проверяет ответы `initialize`/`tools/list`.  
-- Recommended next steps: add unit tests around `PostgreSQLManager`, `SSHManager`, and `APIManager` using a headless test framework (e.g., Jest + test containers for PostgreSQL and SSH).  
-- Introduce linters (`eslint`, `prettier`) and type checks to enforce coding standards.  
-- Establish integration smoke tests that validate TLS handshakes using mock certificates.  
-- Use `integration/docker-compose.yml` to spin up disposable PostgreSQL (`127.0.0.1:5432`, `mcp_user/mcp_pass`) and SSH (`127.0.0.1:2222`, `mcp/mcp_pass`) targets for end-to-end validation; see `integration/README.md`.
+## Testing
+- `npm test` runs the Node.js test suite (including the STDIO handshake smoke test).
+- `npm run smoke` validates the Docker-backed integration targets; see `integration/README.md`.

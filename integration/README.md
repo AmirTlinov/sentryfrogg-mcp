@@ -1,5 +1,26 @@
 # Integration Stacks
 
+This directory provides local Docker targets for integration testing of the MCP tools.
+
+## Quick run (EN)
+
+- Start: `docker compose -f integration/docker-compose.yml up -d --build`
+- Smoke check: `npm run smoke`
+- Stop: `docker compose -f integration/docker-compose.yml down -v`
+
+### Smoke environment overrides
+
+`integration/smoke.cjs` supports:
+- `SF_PG_URI` (default: `postgresql://mcp_user:mcp_pass@127.0.0.1:5432/mcp_demo`)
+- `SF_SSH_HOST` (default: `127.0.0.1`)
+- `SF_SSH_PORT` (default: `2222`)
+- `SF_SSH_USER` (default: `mcp`)
+- `SF_SSH_PASSWORD` (default: `mcp_pass`)
+
+---
+
+## Русский
+
 Этот каталог предоставляет локальные стенды для интеграционного тестирования MCP-инструментов.
 
 ## Сервисы

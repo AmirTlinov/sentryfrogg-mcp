@@ -114,12 +114,6 @@ Desktop.ini
 *.swo
 *~
 
-# Test files
-test_*.js
-*_test.js
-test/
-tests/
-
 # Database files
 *.db
 *.sqlite
