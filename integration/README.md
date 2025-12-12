@@ -17,6 +17,10 @@ This directory provides local Docker targets for integration testing of the MCP 
 - `SF_SSH_USER` (default: `mcp`)
 - `SF_SSH_PASSWORD` (default: `mcp_pass`)
 
+### Port conflicts
+
+If `5432` or `2222` are already in use on your machine, change the `ports:` mappings in `integration/docker-compose.yml` and set `SF_PG_URI` / `SF_SSH_PORT` accordingly for `npm run smoke`.
+
 ---
 
 ## Русский
@@ -50,6 +54,10 @@ docker compose -f integration/docker-compose.yml down -v
 
 - PostgreSQL: `psql postgresql://mcp_user:mcp_pass@127.0.0.1:5432/mcp_demo`
 - SSH: `ssh mcp@127.0.0.1 -p 2222` (пароль `mcp_pass`)
+
+## Если порты заняты
+
+Если на машине уже занят `5432` или `2222`, поменяйте проброс `ports:` в `integration/docker-compose.yml` и передайте новые значения через `SF_PG_URI` / `SF_SSH_PORT` для `npm run smoke`.
 
 ## Использование с MCP инструментами
 
