@@ -36,7 +36,7 @@
   "author": "AmirTlinov",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.20.1",
+    "@modelcontextprotocol/sdk": "^1.24.3",
     "node-fetch": "^3.3.2",
     "pg": "^8.11.3",
     "ssh2": "^1.15.0"
