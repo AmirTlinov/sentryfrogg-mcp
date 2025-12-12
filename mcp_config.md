@@ -2,6 +2,10 @@
 
 SentryFrogg is a **stdio-based** Model Context Protocol (MCP) server. Your MCP client should spawn `node` and point it at `sentryfrogg_server.cjs`.
 
+See also:
+- `docs/tools.md` (tool reference + examples)
+- `docs/architecture.md` (architecture overview)
+
 ## Minimal client config (stdio)
 
 ```json
@@ -18,6 +22,7 @@ SentryFrogg is a **stdio-based** Model Context Protocol (MCP) server. Your MCP c
 Notes:
 - Use an **absolute** path to avoid working-directory surprises.
 - PostgreSQL and SSH require `setup_profile`. The HTTP client (`mcp_api_client`) is stateless.
+ - `profile_name` defaults to `default` when omitted.
 
 ## Where profiles and keys are stored
 

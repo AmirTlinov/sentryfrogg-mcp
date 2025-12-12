@@ -1,39 +1,43 @@
-# SentryFrogg MCP Server v4.2.0
+# SentryFrogg MCP Server
 
-[English](README.md) • [Конфигурация MCP](mcp_config.md) • [Интеграционный стенд](integration/README.md) • [История изменений](CHANGELOG.md)
+[English](README.md) • [Docs](docs/README.md) • [Конфигурация MCP](mcp_config.md) • [Интеграционный стенд](integration/README.md) • [История изменений](CHANGELOG.md)
 
-SentryFrogg — MCP-сервер (stdio) для управляемых операций с:
-- PostgreSQL (`mcp_psql_manager`)
-- SSH (`mcp_ssh_manager`)
-- HTTP (`mcp_api_client`)
+SentryFrogg — MCP-сервер (stdio) для операций с PostgreSQL, SSH и HTTP.
 
-## Быстрый старт
-1. Установите зависимости: `npm install`
-2. Зарегистрируйте сервер в вашем MCP-клиенте (stdio): см. [mcp_config.md](mcp_config.md)
-3. Запустите сервер: `npm start`
-4. В MCP-клиенте вызовите `help`, затем `setup_profile` для PostgreSQL/SSH (HTTP-клиент без профилей)
+## Возможности
+- PostgreSQL: параметризованные запросы, хелперы каталога, опциональный client TLS
+- SSH: последовательное выполнение команд в рамках профиля
+- HTTP: простой клиент с заголовками и bearer-токенами
+- Профили шифруются и хранятся локально (`profiles.json` + `.mcp_profiles.key`)
+- Логи пишутся в **stderr** (stdout — под MCP JSON-RPC)
 
 Требования: Node.js `>=18`, npm `>=8`.
 
-## Скрипты разработки
-| Задача | Команда |
-| --- | --- |
-| Старт | `npm start` |
-| Проверка синтаксиса | `npm run check` |
-| Unit-тесты | `npm test` |
-| Интеграционные цели (Docker) | `docker compose -f integration/docker-compose.yml up -d --build` |
-| Smoke-прогон интеграции | `npm run smoke` |
-| Остановка стенда | `docker compose -f integration/docker-compose.yml down -v` |
+## Быстрый старт
+1. Установите зависимости: `npm install`
+2. Зарегистрируйте сервер в MCP-клиенте (stdio): см. `mcp_config.md`
+3. Запустите сервер: `npm start`
+4. В MCP-клиенте вызовите `help`, затем `setup_profile` для PostgreSQL/SSH
 
-## Профили и безопасность
-- Локальное состояние хранится в `profiles.json`, ключ — в `.mcp_profiles.key` (создаётся автоматически).
-- Не коммитьте `profiles.json` и `.mcp_profiles.key`. Для надёжности вынесите их за пределы репозитория через `MCP_PROFILES_DIR` / `MCP_PROFILE_KEY_PATH`.
-- Про уязвимости и disclosure: [SECURITY.md](SECURITY.md).
-- Чеклист перед публикацией: [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md).
+## Инструменты
+- `help`
+- `mcp_psql_manager`
+- `mcp_ssh_manager`
+- `mcp_api_client`
 
-## Вклад и правила сообщества
-- Как контрибьютить: [CONTRIBUTING.md](CONTRIBUTING.md).
-- Кодекс поведения: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+Примеры и паттерны вызовов: `docs/tools.md`.
+
+## Разработка
+- `npm run check`
+- `npm test`
+- `npm run smoke` (Docker) — см. `integration/README.md`
+
+## Безопасность
+Сервер умеет выполнять SQL/SSH/HTTP по замыслу — запускайте только в доверенной среде.
+
+- Репорт уязвимостей: `SECURITY.md`
+- Чеклист перед публикацией: `PUBLIC_RELEASE_CHECKLIST.md`
 
 ## Лицензия
-MIT: см. [LICENSE](LICENSE).
+MIT — см. `LICENSE`.
+
