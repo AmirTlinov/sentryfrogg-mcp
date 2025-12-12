@@ -24,6 +24,18 @@ Example purge (uses `git filter-repo`):
 git filter-repo --path .mcp_profiles.key --path profiles.json --invert-paths
 ```
 
+If `git filter-repo` is not available, you can use the built-in `git filter-branch` (slower, but works for small repos):
+
+```bash
+git filter-branch --force --index-filter \
+  "git rm --cached --ignore-unmatch .mcp_profiles.key profiles.json" \
+  --prune-empty --tag-name-filter cat -- --all
+
+rm -rf .git/refs/original
+git reflog expire --expire=now --all
+git gc --prune=now --aggressive
+```
+
 After rewriting history:
 - Re-tag/release as needed
 - Force-push branches and tags
