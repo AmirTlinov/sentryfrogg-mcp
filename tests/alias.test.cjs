@@ -84,3 +84,30 @@ test('ToolExecutor resolves alias and merges args', async () => {
   process.env.MCP_PROFILES_DIR = original;
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test('ToolExecutor resolves built-in aliasMap entries', async () => {
+  const stateService = {
+    async set() {},
+  };
+
+  const executor = new ToolExecutor(
+    loggerStub,
+    stateService,
+    null,
+    null,
+    null,
+    {
+      mcp_pipeline: async (args) => ({ ok: true, args }),
+    },
+    {
+      aliasMap: {
+        pipeline: 'mcp_pipeline',
+      },
+    }
+  );
+
+  const payload = await executor.execute('pipeline', { action: 'describe' });
+  assert.equal(payload.meta.tool, 'mcp_pipeline');
+  assert.equal(payload.meta.invoked_as, 'pipeline');
+  assert.equal(payload.result.args.action, 'describe');
+});

@@ -376,7 +376,7 @@ class SentryFroggServer {
     this.server = new Server(
       {
         name: 'sentryfrogg',
-        version: '6.2.0',
+        version: '6.2.1',
       },
       {
         capabilities: {
@@ -395,7 +395,7 @@ class SentryFroggServer {
       await this.setupHandlers();
       this.initialized = true;
       const logger = this.container.get('logger');
-      logger.info('SentryFrogg MCP Server v6.1.0 ready');
+      logger.info('SentryFrogg MCP Server v6.2.1 ready');
     } catch (error) {
       process.stderr.write(`Failed to initialize SentryFrogg MCP Server: ${error.message}\n`);
       throw error;
@@ -567,7 +567,7 @@ class SentryFroggServer {
     }
 
     return {
-      version: '6.2.0',
+      version: '6.2.1',
       architecture: 'lightweight-service-layer',
       ...ServiceBootstrap.getStats(),
     };

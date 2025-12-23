@@ -499,7 +499,7 @@ class APIManager {
 
   buildHeaders(baseHeaders, authHeaders) {
     return {
-      'User-Agent': 'sentryfrogg-api-client/6.1.0',
+      'User-Agent': 'sentryfrogg-api-client/6.2.1',
       Accept: 'application/json, text/plain, */*',
       ...baseHeaders,
       ...authHeaders,
@@ -974,7 +974,8 @@ class APIManager {
 
       if (cachePolicy.enabled && this.cacheService) {
         const config = this.buildRequestConfig(args, profile, auth);
-        cacheKey = cachePolicy.key || this.buildCacheKey(args, config);
+        const explicitKey = cachePolicy.key !== undefined ? this.cacheService.normalizeKey(cachePolicy.key) : null;
+        cacheKey = explicitKey || this.buildCacheKey(args, config);
         if (cacheKey) {
           const cached = await this.cacheService.getJson(cacheKey, cachePolicy.ttl_ms);
           if (cached?.value) {

@@ -272,6 +272,10 @@ class ServiceBootstrap {
             api: 'mcp_api_client',
             state: 'mcp_state',
             runbook: 'mcp_runbook',
+            alias: 'mcp_alias',
+            preset: 'mcp_preset',
+            audit: 'mcp_audit',
+            pipeline: 'mcp_pipeline',
           },
         }), {
       singleton: true,

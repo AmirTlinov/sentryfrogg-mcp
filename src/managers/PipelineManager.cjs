@@ -175,7 +175,7 @@ class PipelineManager {
     const config = this.apiManager.buildRequestConfig(httpArgs, profile, auth);
     const cachePolicy = this.normalizeCache(cacheArgs, httpArgs.cache, profile.data.cache);
     const cacheKey = cachePolicy.enabled && this.cacheService
-      ? (cachePolicy.key || this.cacheService.buildKey({
+      ? (this.cacheService.normalizeKey(cachePolicy.key) || this.cacheService.buildKey({
         url: config.url,
         method: config.method,
         headers: config.headers,

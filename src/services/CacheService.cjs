@@ -22,6 +22,33 @@ class CacheService {
     };
   }
 
+  ensureKey(key) {
+    const normalized = typeof key === 'string' ? key.trim().toLowerCase() : '';
+    if (!/^[a-f0-9]{64}$/.test(normalized)) {
+      throw new Error('Cache key must be a sha256 hex string');
+    }
+    return normalized;
+  }
+
+  normalizeKey(key) {
+    if (key === undefined || key === null || key === '') {
+      return null;
+    }
+
+    if (typeof key === 'string') {
+      const trimmed = key.trim();
+      if (!trimmed) {
+        return null;
+      }
+      if (/^[a-f0-9]{64}$/i.test(trimmed)) {
+        return trimmed.toLowerCase();
+      }
+      return this.buildKey(trimmed);
+    }
+
+    return this.buildKey(key);
+  }
+
   buildKey(input) {
     const payload = this.stableStringify(input);
     return crypto.createHash('sha256').update(payload).digest('hex');
@@ -43,11 +70,13 @@ class CacheService {
   }
 
   entryPath(key) {
-    return path.join(this.cacheDir, `${key}.json`);
+    const normalized = this.ensureKey(key);
+    return path.join(this.cacheDir, `${normalized}.json`);
   }
 
   dataPath(key) {
-    return path.join(this.cacheDir, `${key}.bin`);
+    const normalized = this.ensureKey(key);
+    return path.join(this.cacheDir, `${normalized}.bin`);
   }
 
   isExpired(meta, ttlOverride) {
@@ -127,6 +156,7 @@ class CacheService {
   }
 
   async createFileWriter(key, meta = {}) {
+    key = this.ensureKey(key);
     await fs.mkdir(this.cacheDir, { recursive: true });
     const tmpPath = `${this.dataPath(key)}.part-${Date.now()}`;
     const stream = createWriteStream(tmpPath);
