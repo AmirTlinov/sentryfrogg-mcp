@@ -10,6 +10,8 @@ This project can create local state files (`profiles.json`, `.mcp_profiles.key`)
 - Check if secret files exist in history:
   - `git log --oneline -- .mcp_profiles.key profiles.json`
   - if this prints commits, follow section **2** before going public.
+- Optional: scan history for other likely-sensitive filenames (names only):
+  - `git log --all --pretty=format: --name-only | rg -i "password|token|secret|\\.pem$|id_rsa|\\.key$" | sort -u`
 
 ## 2) If secrets were committed in git history
 
