@@ -6,7 +6,7 @@ const { dirname, join } = require('node:path');
 
 const PROJECT_ROOT = dirname(__dirname);
 
-function startServer(args = []) {
+function startServer(args = [], envOverrides = {}) {
   const profilesDir = fs.mkdtempSync(join(os.tmpdir(), 'sentryfrogg-mcp-test-'));
   const proc = spawn('node', ['sentryfrogg_server.cjs', ...args], {
     cwd: PROJECT_ROOT,
@@ -14,6 +14,7 @@ function startServer(args = []) {
     env: {
       ...process.env,
       MCP_PROFILES_DIR: profilesDir,
+      ...envOverrides,
     },
   });
   proc.__sentryfrogg_profiles_dir = profilesDir;

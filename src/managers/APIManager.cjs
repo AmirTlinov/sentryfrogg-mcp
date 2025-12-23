@@ -500,7 +500,7 @@ class APIManager {
 
   buildHeaders(baseHeaders, authHeaders) {
     return {
-      'User-Agent': 'sentryfrogg-api-client/6.3.0',
+      'User-Agent': 'sentryfrogg-api-client/6.4.0',
       Accept: 'application/json, text/plain, */*',
       ...baseHeaders,
       ...authHeaders,

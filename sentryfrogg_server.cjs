@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// SentryFrogg MCP Server v6.3.0
+// SentryFrogg MCP Server v6.4.0
 
 process.on('unhandledRejection', (reason, promise) => {
   process.stderr.write(`🔥 Unhandled Promise Rejection: ${reason}\n`);
@@ -23,6 +23,7 @@ const {
 const crypto = require('crypto');
 
 const ServiceBootstrap = require('./src/bootstrap/ServiceBootstrap.cjs');
+const { isUnsafeLocalEnabled } = require('./src/utils/featureFlags.cjs');
 
 const outputSchema = {
   type: 'object',
@@ -358,6 +359,52 @@ const toolCatalog = [
   }
 ];
 
+if (isUnsafeLocalEnabled()) {
+  toolCatalog.push({
+    name: 'mcp_local',
+    description: 'UNSAFE local machine access: exec and filesystem helpers (requires SENTRYFROGG_UNSAFE_LOCAL=1).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['exec', 'batch', 'fs_read', 'fs_write', 'fs_list', 'fs_stat', 'fs_mkdir', 'fs_rm'] },
+        command: { type: 'string' },
+        args: { type: 'array' },
+        shell: { type: ['boolean', 'string'] },
+        cwd: { type: 'string' },
+        env: { type: 'object' },
+        stdin: { type: 'string' },
+        timeout_ms: { type: 'integer' },
+        inline: { type: 'boolean' },
+        commands: { type: 'array', items: { type: 'object' } },
+        parallel: { type: 'boolean' },
+        stop_on_error: { type: 'boolean' },
+        path: { type: 'string' },
+        encoding: { type: 'string' },
+        offset: { type: 'integer' },
+        length: { type: 'integer' },
+        content: {},
+        content_base64: { type: 'string' },
+        overwrite: { type: 'boolean' },
+        mode: { type: 'integer' },
+        recursive: { type: 'boolean' },
+        max_depth: { type: 'integer' },
+        with_stats: { type: 'boolean' },
+        force: { type: 'boolean' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  });
+}
+
 const toolByName = Object.fromEntries(toolCatalog.map((tool) => [tool.name, tool]));
 toolCatalog.push(
   { name: 'sql', description: 'Alias for mcp_psql_manager.', inputSchema: toolByName.mcp_psql_manager.inputSchema },
@@ -373,12 +420,16 @@ toolCatalog.push(
   { name: 'pipeline', description: 'Alias for mcp_pipeline.', inputSchema: toolByName.mcp_pipeline.inputSchema }
 );
 
+if (toolByName.mcp_local) {
+  toolCatalog.push({ name: 'local', description: 'Alias for mcp_local.', inputSchema: toolByName.mcp_local.inputSchema });
+}
+
 class SentryFroggServer {
   constructor() {
     this.server = new Server(
       {
         name: 'sentryfrogg',
-        version: '6.3.0',
+        version: '6.4.0',
       },
       {
         capabilities: {
@@ -397,7 +448,7 @@ class SentryFroggServer {
       await this.setupHandlers();
       this.initialized = true;
       const logger = this.container.get('logger');
-      logger.info('SentryFrogg MCP Server v6.3.0 ready');
+      logger.info('SentryFrogg MCP Server v6.4.0 ready');
     } catch (error) {
       process.stderr.write(`Failed to initialize SentryFrogg MCP Server: ${error.message}\n`);
       throw error;
@@ -519,12 +570,21 @@ class SentryFroggServer {
       },
     };
 
+    if (isUnsafeLocalEnabled()) {
+      summaries.mcp_local = {
+        description: 'Local (UNSAFE): локальные exec и filesystem операции (только при включённом unsafe режиме).',
+        usage: 'exec/batch/fs_read/fs_write/fs_list/fs_stat/fs_mkdir/fs_rm',
+      };
+    }
+
     if (tool && summaries[tool]) {
       return summaries[tool];
     }
 
     return {
-      overview: 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, runbook, alias, preset, audit и pipeline инструменты. Можно использовать профиль или inline-подключение в каждом вызове.',
+      overview: isUnsafeLocalEnabled()
+        ? 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, runbook, alias, preset, audit, pipeline и (unsafe) local инструменты. Можно использовать профиль или inline-подключение в каждом вызове.'
+        : 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, runbook, alias, preset, audit и pipeline инструменты. Можно использовать профиль или inline-подключение в каждом вызове.',
       tools: Object.entries(summaries).map(([key, value]) => ({
         name: key,
         description: value.description,
@@ -569,7 +629,7 @@ class SentryFroggServer {
     }
 
     return {
-      version: '6.3.0',
+      version: '6.4.0',
       architecture: 'lightweight-service-layer',
       ...ServiceBootstrap.getStats(),
     };

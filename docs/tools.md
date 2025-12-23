@@ -534,3 +534,35 @@ Postgres → HTTP example:
   "http": { "url": "https://example.com/ingest", "method": "POST" }
 }
 ```
+
+## `mcp_local` (unsafe)
+
+This tool provides **local machine access** (exec + filesystem). It is **disabled by default** and is only exposed in `tools/list` when you set:
+
+- `SENTRYFROGG_UNSAFE_LOCAL=1` (preferred), or
+- `SF_UNSAFE_LOCAL=1`
+
+Key actions:
+- `exec` / `batch`
+- `fs_read` / `fs_write` / `fs_list` / `fs_stat` / `fs_mkdir` / `fs_rm`
+
+Exec example (also available via alias `local`):
+
+```json
+{
+  "action": "exec",
+  "command": "git",
+  "args": ["status", "--porcelain"],
+  "inline": true
+}
+```
+
+Filesystem example:
+
+```json
+{ "action": "fs_write", "path": "/tmp/hello.txt", "content": "hello", "overwrite": true }
+```
+
+```json
+{ "action": "fs_read", "path": "/tmp/hello.txt" }
+```

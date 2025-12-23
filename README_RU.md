@@ -19,6 +19,7 @@ SentryFrogg — MCP-сервер (stdio), который даёт LLM-агент
 - Наблюдаемость: trace/span метаданные и аудит-лог с редактированием.
 - Профили шифруются (AES-256-GCM) и хранятся локально.
 - Безопасные дефолты для записи файлов (без перезаписи, если не указать `overwrite: true`).
+- Опциональный unsafe local режим для полной автономности агента (локальный exec + filesystem).
 
 ## Сценарии
 - Синхронизация или бэкфилл данных между API, SFTP и PostgreSQL.
@@ -70,8 +71,9 @@ SentryFrogg — MCP-сервер (stdio), который даёт LLM-агент
 - `mcp_preset`
 - `mcp_audit`
 - `mcp_pipeline`
+- `mcp_local` (unsafe, опционально)
 
-Короткие алиасы: `sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `pipeline`.
+Короткие алиасы: `sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `pipeline` (и `local`, если включён unsafe режим).
 
 Примеры и паттерны вызовов: `docs/tools.md`.
 

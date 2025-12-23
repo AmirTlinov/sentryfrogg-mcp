@@ -106,6 +106,13 @@ class ServiceBootstrap {
         toolExecutor.register('mcp_runbook', (args) => runbookManager.handleAction(args));
       }
 
+      if (this.container.has('toolExecutor') && this.container.has('localManager')) {
+        const toolExecutor = this.container.get('toolExecutor');
+        const localManager = this.container.get('localManager');
+        toolExecutor.register('mcp_local', (args) => localManager.handleAction(args));
+        toolExecutor.aliasMap.local = 'mcp_local';
+      }
+
       this.initialized = true;
 
       if (this.container.has('logger')) {
@@ -211,6 +218,7 @@ class ServiceBootstrap {
     const PostgreSQLManager = require('../managers/PostgreSQLManager.cjs');
     const SSHManager = require('../managers/SSHManager.cjs');
     const APIManager = require('../managers/APIManager.cjs');
+    const LocalManager = require('../managers/LocalManager.cjs');
     const StateManager = require('../managers/StateManager.cjs');
     const RunbookManager = require('../managers/RunbookManager.cjs');
     const AliasManager = require('../managers/AliasManager.cjs');
@@ -218,6 +226,7 @@ class ServiceBootstrap {
     const AuditManager = require('../managers/AuditManager.cjs');
     const PipelineManager = require('../managers/PipelineManager.cjs');
     const ToolExecutor = require('../services/ToolExecutor.cjs');
+    const { isUnsafeLocalEnabled } = require('../utils/featureFlags.cjs');
 
     // PostgreSQL Manager
     this.container.register('postgresqlManager', 
@@ -242,6 +251,15 @@ class ServiceBootstrap {
       singleton: true,
       dependencies: ['logger', 'security', 'validation', 'profileService', 'cacheService'] 
     });
+
+    if (isUnsafeLocalEnabled()) {
+      this.container.register('localManager',
+        (logger, validation) =>
+          new LocalManager(logger, validation, { enabled: true }), {
+        singleton: true,
+        dependencies: ['logger', 'validation'],
+      });
+    }
 
     // State Manager
     this.container.register('stateManager',

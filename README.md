@@ -19,6 +19,7 @@ If you want your agent to move real data (API ↔ SFTP ↔ Postgres), run contro
 - Observability with trace/span metadata and audit logs (redacted).
 - Encrypted local profile store (AES-256-GCM).
 - Safe-by-default local writes (no overwrite unless `overwrite: true`).
+- Optional unsafe local mode for full agent autonomy (local exec + filesystem).
 
 ## Use cases
 - Sync or backfill data between APIs, SFTP drops, and PostgreSQL.
@@ -81,8 +82,9 @@ Export Postgres to SFTP:
 - `mcp_preset`
 - `mcp_audit`
 - `mcp_pipeline`
+- `mcp_local` (unsafe, opt-in)
 
-Short aliases are also available (`sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `pipeline`).
+Short aliases are also available (`sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `pipeline`; plus `local` when unsafe mode is enabled).
 
 Reference + examples: `docs/tools.md`.
 

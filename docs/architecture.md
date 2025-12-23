@@ -74,6 +74,7 @@ Environment variables:
 - `MCP_CACHE_DIR` — directory for cache files
 - `ENCRYPTION_KEY` — supply a stable encryption key (recommended for shared environments)
 - `LOG_LEVEL` — `error` / `warn` / `info` / `debug`
+- `SENTRYFROGG_UNSAFE_LOCAL` / `SF_UNSAFE_LOCAL` — enable `mcp_local` (local exec + filesystem). Disabled by default.
 
 ## Operational model
 
