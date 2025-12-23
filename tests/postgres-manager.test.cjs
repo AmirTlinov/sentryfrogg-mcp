@@ -12,11 +12,8 @@ const loggerStub = {
 };
 
 const validationStub = {
-  ensureConnectionProfile(profile) {
-    return { ...profile };
-  },
-  ensureLimit(limit) {
-    return limit ?? 100;
+  ensureString(value) {
+    return value;
   },
   ensureTableName(name) {
     return name;
@@ -27,99 +24,129 @@ const validationStub = {
   ensureDataObject(data) {
     return data;
   },
-  ensureWhereClause(where) {
-    return where;
-  },
   ensureSql(sql) {
     return sql;
   },
 };
 
-const profileServiceStub = () => {
-  return {
-    stored: new Map(),
-    async setProfile(name, config) {
-      this.stored.set(name, config);
-    },
-    async listProfiles() {
-      return [];
-    },
-    async getProfile(name) {
-      return this.stored.get(name);
-    },
-  };
-};
+const profileServiceStub = () => ({
+  stored: new Map(),
+  async setProfile(name, config) {
+    this.stored.set(name, config);
+  },
+  async listProfiles() {
+    return [];
+  },
+  async getProfile(name) {
+    return this.stored.get(name);
+  },
+  async deleteProfile(name) {
+    this.stored.delete(name);
+  },
+});
 
-test('setupProfile invalidates existing pool after successful update', async () => {
+test('profileUpsert invalidates existing pool after successful update', async () => {
   const service = profileServiceStub();
-  const manager = new PostgreSQLManager(loggerStub, {}, validationStub, service);
+  const manager = new PostgreSQLManager(loggerStub, validationStub, service);
   manager.testConnection = async () => {};
 
   let closed = false;
-  manager.pools.set('default', {
+  manager.pools.set('profile:default', {
     async end() {
       closed = true;
     },
   });
 
-  await manager.setupProfile('default', {
-    host: 'db.local',
-    port: 5432,
-    username: 'service',
-    password: 'secret',
-    database: 'warehouse',
+  await manager.profileUpsert('default', {
+    connection: {
+      host: 'db.local',
+      port: 5432,
+      username: 'service',
+      password: 'secret',
+      database: 'warehouse',
+    },
   });
 
   assert.ok(closed, 'expected existing pool to be closed');
-  assert.equal(manager.pools.has('default'), false);
+  assert.equal(manager.pools.has('profile:default'), false);
 });
 
-test('describeTable honours provided schema', async () => {
+test('catalogColumns honours provided schema', async () => {
   const service = profileServiceStub();
   service.stored.set('default', {
-    host: 'db',
-    port: 5432,
-    username: 'x',
-    password: 'p',
-    database: 'd',
-    ssl: false,
-  });
-
-  const manager = new PostgreSQLManager(loggerStub, {}, validationStub, service);
-  manager.pools.clear();
-  manager.getPool = async () => ({
-    async query(sql, params) {
-      return { rows: [{ sql, params }] };
+    data: {
+      host: 'db',
+      port: 5432,
+      username: 'x',
+      password: 'p',
+      database: 'd',
+      ssl: false,
     },
   });
 
-  const result = await manager.describeTable('default', 'orders', 'analytics');
-  assert.equal(result.schema, 'analytics');
-  assert.deepEqual(result.columns[0].params, ['analytics', 'orders']);
-});
-
-test('sampleData qualifies schema name in generated SQL', async () => {
-  const service = profileServiceStub();
-  service.stored.set('default', {
-    host: 'db',
-    port: 5432,
-    username: 'x',
-    password: 'p',
-    database: 'd',
-    ssl: false,
+  const manager = new PostgreSQLManager(loggerStub, validationStub, service);
+  let capturedParams;
+  manager.getPool = async () => ({
+    async query(config) {
+      capturedParams = config.values;
+      return { command: 'SELECT', rowCount: 1, rows: [{ ok: true }], fields: [] };
+    },
   });
 
-  const manager = new PostgreSQLManager(loggerStub, {}, validationStub, service);
+  const result = await manager.catalogColumns({ profile_name: 'default', table: 'orders', schema: 'analytics' });
+  assert.equal(result.schema, 'analytics');
+  assert.deepEqual(capturedParams, ['analytics', 'orders']);
+});
+
+test('insert quotes identifiers and returns metadata', async () => {
+  const service = profileServiceStub();
+  const manager = new PostgreSQLManager(loggerStub, validationStub, service);
+
   let capturedSql;
+  let capturedValues;
   manager.getPool = async () => ({
-    async query(sql, params) {
-      capturedSql = { sql, params };
-      return { rowCount: 1, rows: [{ id: 1 }] };
+    async query(config) {
+      capturedSql = config.text;
+      capturedValues = config.values;
+      return { command: 'INSERT', rowCount: 1, rows: [{ id: 1 }], fields: [] };
     },
   });
 
-  const result = await manager.sampleData('default', 'orders', 5, 'analytics');
-  assert.equal(capturedSql.sql, 'SELECT * FROM analytics.orders LIMIT $1');
-  assert.deepEqual(capturedSql.params, [5]);
-  assert.equal(result.schema, 'analytics');
+  const result = await manager.insert({
+    connection: {},
+    table: 'analytics.orders',
+    data: { status: 'new', amount: 10 },
+    returning: true,
+  });
+
+  assert.ok(capturedSql.includes('"analytics"."orders"'));
+  assert.ok(capturedSql.includes('"status"'));
+  assert.ok(capturedSql.includes('"amount"'));
+  assert.ok(capturedSql.includes('RETURNING *'));
+  assert.deepEqual(capturedValues, ['new', 10]);
+  assert.equal(result.command, 'INSERT');
+});
+
+test('update and delete allow missing filters', async () => {
+  const service = profileServiceStub();
+  const manager = new PostgreSQLManager(loggerStub, validationStub, service);
+
+  let capturedUpdateSql;
+  let capturedDeleteSql;
+  manager.getPool = async () => ({
+    async query(config) {
+      if (config.text.startsWith('UPDATE')) {
+        capturedUpdateSql = config.text;
+      } else if (config.text.startsWith('DELETE')) {
+        capturedDeleteSql = config.text;
+      }
+      return { command: 'OK', rowCount: 0, rows: [], fields: [] };
+    },
+  });
+
+  await manager.update({ connection: {}, table: 'orders', data: { status: 'archived' } });
+  await manager.remove({ connection: {}, table: 'orders' });
+
+  assert.ok(!capturedUpdateSql.includes('WHERE'));
+  assert.ok(!capturedDeleteSql.includes('WHERE'));
 });

@@ -8,7 +8,7 @@ class Constants {
       POSTGRES_DEFAULT_PORT: 5432,
       SSH_DEFAULT_PORT: 22,
       TIMEOUT_SSH_READY: 10000,       // 10 секунд
-      TIMEOUT_SSH_COMMAND: 30000,     // 30 секунд
+      TIMEOUT_API_REQUEST: 30000,     // 30 секунд
       TIMEOUT_MUTEX: 30000,           // 30 секунд
       TIMEOUT_CONNECTION: 5000,       // 5 секунд
       TIMEOUT_IDLE: 300000,           // 5 минут
@@ -21,19 +21,10 @@ class Constants {
   // Лимиты и размеры
   static get LIMITS() {
     return {
-      MAX_DATA_SIZE: 1024 * 1024,     // 1MB
-      MAX_PASSWORD_LENGTH: 128,
-      MAX_URL_LENGTH: 2048,
-      MAX_TABLE_NAME_LENGTH: 63,
-      MAX_COMMAND_LENGTH: 1024,
-      MAX_SQL_COMMAND_LENGTH: 1000,
       MAX_CONNECTIONS: 10,
-      MAX_QUERY_LIMIT: 10000,
-      MIN_QUERY_LIMIT: 1,
       MAX_PORT: 65535,
       MIN_PORT: 1,
       SAMPLE_DATA_LIMIT: 10,
-      DEFAULT_QUERY_LIMIT: 100,
       LOG_SUBSTRING_LENGTH: 100,
       COMMAND_SUBSTRING_LENGTH: 50
     };
@@ -52,6 +43,32 @@ class Constants {
     };
   }
 
+  // Retry defaults (HTTP)
+  static get RETRY() {
+    return {
+      MAX_ATTEMPTS: 3,
+      BASE_DELAY_MS: 250,
+      MAX_DELAY_MS: 5000,
+      JITTER: 0.2,
+      STATUS_CODES: [408, 429, 500, 502, 503, 504]
+    };
+  }
+
+  // Pagination defaults
+  static get PAGINATION() {
+    return {
+      MAX_PAGES: 10,
+      PAGE_SIZE: 100
+    };
+  }
+
+  // Cache defaults
+  static get CACHE() {
+    return {
+      DEFAULT_TTL_MS: 60000
+    };
+  }
+
   // Размеры буферов и окон
   static get BUFFERS() {
     return {
@@ -60,7 +77,8 @@ class Constants {
       MAX_LOG_SIZE: 10 * 1024 * 1024, // 10MB
       MAX_LOG_FILES: 10,
       CRYPTO_KEY_SIZE: 32,
-      CRYPTO_IV_SIZE: 16,
+      CRYPTO_IV_SIZE: 12,
+      CRYPTO_TAG_SIZE: 16,
       CRYPTO_SALT_SIZE: 32
     };
   }
@@ -68,7 +86,7 @@ class Constants {
   // Алгоритмы и шифрование
   static get CRYPTO() {
     return {
-      ALGORITHM: 'aes-256-cbc',
+      ALGORITHM: 'aes-256-gcm',
       PBKDF2_ITERATIONS: 100000,
       HASH_LENGTH: 64,
       HASH_ALGORITHM: 'sha512'

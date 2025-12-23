@@ -73,6 +73,12 @@ typings/
 .env.test
 .mcp_profiles.key
 profiles.json
+state.json
+runbooks.json
+aliases.json
+presets.json
+audit.jsonl
+cache/
 
 # parcel-bundler cache
 .cache/

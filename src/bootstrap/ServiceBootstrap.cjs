@@ -83,6 +83,28 @@ class ServiceBootstrap {
         const profileService = this.container.get('profileService');
         await profileService.initialize();
       }
+      if (this.container.has('stateService')) {
+        const stateService = this.container.get('stateService');
+        await stateService.initialize();
+      }
+      if (this.container.has('runbookService')) {
+        const runbookService = this.container.get('runbookService');
+        await runbookService.initialize();
+      }
+      if (this.container.has('aliasService')) {
+        const aliasService = this.container.get('aliasService');
+        await aliasService.initialize();
+      }
+      if (this.container.has('presetService')) {
+        const presetService = this.container.get('presetService');
+        await presetService.initialize();
+      }
+
+      if (this.container.has('toolExecutor') && this.container.has('runbookManager')) {
+        const toolExecutor = this.container.get('toolExecutor');
+        const runbookManager = this.container.get('runbookManager');
+        toolExecutor.register('mcp_runbook', (args) => runbookManager.handleAction(args));
+      }
 
       this.initialized = true;
 
@@ -110,6 +132,12 @@ class ServiceBootstrap {
     const Security = require('../services/Security.cjs');
     const Validation = require('../services/Validation.cjs');
     const ProfileService = require('../services/ProfileService.cjs');
+    const StateService = require('../services/StateService.cjs');
+    const RunbookService = require('../services/RunbookService.cjs');
+    const AliasService = require('../services/AliasService.cjs');
+    const PresetService = require('../services/PresetService.cjs');
+    const AuditService = require('../services/AuditService.cjs');
+    const CacheService = require('../services/CacheService.cjs');
 
     // Logger (базовый сервис)
     this.container.register('logger', () => {
@@ -135,19 +163,68 @@ class ServiceBootstrap {
       singleton: true,
       dependencies: ['logger', 'security'] 
     });
+
+    // State сервис
+    this.container.register('stateService', (logger) =>
+      new StateService(logger), {
+      singleton: true,
+      dependencies: ['logger'],
+    });
+
+    // Runbook сервис
+    this.container.register('runbookService', (logger) =>
+      new RunbookService(logger), {
+      singleton: true,
+      dependencies: ['logger'],
+    });
+
+    // Alias сервис
+    this.container.register('aliasService', (logger) =>
+      new AliasService(logger), {
+      singleton: true,
+      dependencies: ['logger'],
+    });
+
+    // Preset сервис
+    this.container.register('presetService', (logger) =>
+      new PresetService(logger), {
+      singleton: true,
+      dependencies: ['logger'],
+    });
+
+    // Audit сервис
+    this.container.register('auditService', (logger) =>
+      new AuditService(logger), {
+      singleton: true,
+      dependencies: ['logger'],
+    });
+
+    // Cache сервис
+    this.container.register('cacheService', (logger) =>
+      new CacheService(logger), {
+      singleton: true,
+      dependencies: ['logger'],
+    });
   }
 
   static async registerManagers() {
     const PostgreSQLManager = require('../managers/PostgreSQLManager.cjs');
     const SSHManager = require('../managers/SSHManager.cjs');
     const APIManager = require('../managers/APIManager.cjs');
+    const StateManager = require('../managers/StateManager.cjs');
+    const RunbookManager = require('../managers/RunbookManager.cjs');
+    const AliasManager = require('../managers/AliasManager.cjs');
+    const PresetManager = require('../managers/PresetManager.cjs');
+    const AuditManager = require('../managers/AuditManager.cjs');
+    const PipelineManager = require('../managers/PipelineManager.cjs');
+    const ToolExecutor = require('../services/ToolExecutor.cjs');
 
     // PostgreSQL Manager
     this.container.register('postgresqlManager', 
-      (logger, security, validation, profileService) => 
-        new PostgreSQLManager(logger, security, validation, profileService), { 
+      (logger, validation, profileService) => 
+        new PostgreSQLManager(logger, validation, profileService), { 
       singleton: true,
-      dependencies: ['logger', 'security', 'validation', 'profileService'] 
+      dependencies: ['logger', 'validation', 'profileService'] 
     });
 
     // SSH Manager
@@ -160,10 +237,99 @@ class ServiceBootstrap {
 
     // API Manager
     this.container.register('apiManager', 
-      (logger, security, validation) => 
-        new APIManager(logger, security, validation), { 
+      (logger, security, validation, profileService, cacheService) => 
+        new APIManager(logger, security, validation, profileService, cacheService), { 
       singleton: true,
-      dependencies: ['logger', 'security', 'validation'] 
+      dependencies: ['logger', 'security', 'validation', 'profileService', 'cacheService'] 
+    });
+
+    // State Manager
+    this.container.register('stateManager',
+      (logger, stateService) =>
+        new StateManager(logger, stateService), {
+      singleton: true,
+      dependencies: ['logger', 'stateService'],
+    });
+
+    // Tool executor
+    this.container.register('toolExecutor',
+      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, apiManager, stateManager, aliasManager, presetManager, auditManager, pipelineManager) =>
+        new ToolExecutor(logger, stateService, aliasService, presetService, auditService, {
+          mcp_psql_manager: (args) => postgresqlManager.handleAction(args),
+          mcp_ssh_manager: (args) => sshManager.handleAction(args),
+          mcp_api_client: (args) => apiManager.handleAction(args),
+          mcp_state: (args) => stateManager.handleAction(args),
+          mcp_alias: (args) => aliasManager.handleAction(args),
+          mcp_preset: (args) => presetManager.handleAction(args),
+          mcp_audit: (args) => auditManager.handleAction(args),
+          mcp_pipeline: (args) => pipelineManager.handleAction(args),
+        }, {
+          aliasMap: {
+            sql: 'mcp_psql_manager',
+            psql: 'mcp_psql_manager',
+            ssh: 'mcp_ssh_manager',
+            http: 'mcp_api_client',
+            api: 'mcp_api_client',
+            state: 'mcp_state',
+            runbook: 'mcp_runbook',
+          },
+        }), {
+      singleton: true,
+      dependencies: [
+        'logger',
+        'stateService',
+        'aliasService',
+        'presetService',
+        'auditService',
+        'postgresqlManager',
+        'sshManager',
+        'apiManager',
+        'stateManager',
+        'aliasManager',
+        'presetManager',
+        'auditManager',
+        'pipelineManager',
+      ],
+    });
+
+    // Runbook Manager
+    this.container.register('runbookManager',
+      (logger, runbookService, stateService, toolExecutor) =>
+        new RunbookManager(logger, runbookService, stateService, toolExecutor), {
+      singleton: true,
+      dependencies: ['logger', 'runbookService', 'stateService', 'toolExecutor'],
+    });
+
+    // Alias Manager
+    this.container.register('aliasManager',
+      (logger, aliasService) =>
+        new AliasManager(logger, aliasService), {
+      singleton: true,
+      dependencies: ['logger', 'aliasService'],
+    });
+
+    // Preset Manager
+    this.container.register('presetManager',
+      (logger, presetService) =>
+        new PresetManager(logger, presetService), {
+      singleton: true,
+      dependencies: ['logger', 'presetService'],
+    });
+
+    // Audit Manager
+    this.container.register('auditManager',
+      (logger, auditService) =>
+        new AuditManager(logger, auditService), {
+      singleton: true,
+      dependencies: ['logger', 'auditService'],
+    });
+
+    // Pipeline Manager
+    this.container.register('pipelineManager',
+      (logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService) =>
+        new PipelineManager(logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'apiManager', 'sshManager', 'postgresqlManager', 'cacheService', 'auditService'],
     });
   }
 

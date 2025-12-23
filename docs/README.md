@@ -16,4 +16,3 @@ This directory contains the long-form documentation for SentryFrogg.
 - **Security**
   - `../SECURITY.md` (vulnerability reporting policy)
   - `../PUBLIC_RELEASE_CHECKLIST.md` (safe public release checklist)
-

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// SentryFrogg MCP Server v4.2
+// SentryFrogg MCP Server v6.1
 
 process.on('unhandledRejection', (reason, promise) => {
   process.stderr.write(`🔥 Unhandled Promise Rejection: ${reason}\n`);
@@ -20,8 +20,23 @@ const {
   ListToolsRequestSchema,
   McpError,
 } = require('@modelcontextprotocol/sdk/types.js');
+const crypto = require('crypto');
 
 const ServiceBootstrap = require('./src/bootstrap/ServiceBootstrap.cjs');
+
+const outputSchema = {
+  type: 'object',
+  description: 'Output shaping (path/pick/omit/map).',
+  properties: {
+    path: { type: 'string' },
+    pick: { type: 'array', items: { type: 'string' } },
+    omit: { type: 'array', items: { type: 'string' } },
+    map: { type: 'object' },
+    missing: { type: 'string', enum: ['error', 'empty', 'null', 'undefined'] },
+    default: { type: ['string', 'number', 'boolean', 'object', 'array', 'null'] },
+  },
+  additionalProperties: true,
+};
 
 const toolCatalog = [
   {
@@ -34,87 +49,324 @@ const toolCatalog = [
           type: 'string',
           description: 'Название инструмента для детализации. Оставьте пустым для общего описания.',
         },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
       },
       additionalProperties: false,
     },
   },
   {
-    name: 'mcp_psql_manager',
-    description: 'PostgreSQL toolchain. Flow: setup_profile → action. setup_profile accepts credentials or connection_url plus optional TLS (ssl_mode, ssl_ca, ssl_cert, ssl_key, ssl_passphrase, ssl_servername, ssl_reject_unauthorized); secrets stored encrypted. Subsequent calls reuse profile_name: quick_query (adds LIMIT 100 if absent; supports params array for $ placeholders), show_tables, describe_table, sample_data, database_info, insert_data, update_data, delete_data, list_profiles.',
+    name: 'mcp_state',
+    description: 'Session/persistent state store for cross-tool workflows.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['setup_profile', 'list_profiles', 'quick_query', 'show_tables', 'describe_table', 'sample_data', 'insert_data', 'update_data', 'delete_data', 'database_info'] },
-        profile_name: { type: 'string', description: "Profile name (defaults to 'default')" },
-        connection_url: { type: 'string', description: 'postgres://user:pass@host:port/db url' },
-        host: { type: 'string' },
-        port: { type: 'integer' },
-        username: { type: 'string' },
-        password: { type: 'string' },
-        database: { type: 'string' },
-        ssl: { type: ['boolean', 'object'] },
-        ssl_mode: { type: 'string', description: 'disable | require | verify-ca | verify-full' },
-        ssl_ca: { type: 'string', description: 'PEM encoded certificate authority chain' },
-        ssl_cert: { type: 'string', description: 'PEM encoded client certificate' },
-        ssl_key: { type: 'string', description: 'PEM encoded client private key' },
-        ssl_passphrase: { type: 'string', description: 'Optional passphrase for the private key' },
-        ssl_servername: { type: 'string', description: 'Override servername for TLS verification' },
-        ssl_reject_unauthorized: { type: ['boolean', 'string'], description: 'Set to false to trust self-signed certificates' },
+        action: { type: 'string', enum: ['set', 'get', 'list', 'unset', 'clear', 'dump'] },
+        key: { type: 'string' },
+        value: {},
+        scope: { type: 'string', enum: ['session', 'persistent', 'any'] },
+        prefix: { type: 'string' },
+        include_values: { type: 'boolean' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: 'mcp_runbook',
+    description: 'Runbooks: store, list, and execute multi-step workflows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['runbook_upsert', 'runbook_upsert_dsl', 'runbook_get', 'runbook_list', 'runbook_delete', 'runbook_run', 'runbook_run_dsl', 'runbook_compile'] },
+        name: { type: 'string' },
+        runbook: { type: 'object' },
+        dsl: { type: 'string' },
+        text: { type: 'string' },
+        input: { type: 'object' },
+        seed_state: { type: 'object' },
+        seed_state_scope: { type: 'string', enum: ['session', 'persistent'] },
+        stop_on_error: { type: 'boolean' },
+        template_missing: { type: 'string', enum: ['error', 'empty', 'null', 'undefined'] },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: 'mcp_alias',
+    description: 'Alias registry for short names and reusable tool shortcuts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['alias_upsert', 'alias_get', 'alias_list', 'alias_delete', 'alias_resolve'] },
+        name: { type: 'string' },
+        alias: { type: 'object' },
+        tool: { type: 'string' },
+        args: { type: 'object' },
+        preset: { type: 'string' },
+        description: { type: 'string' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: 'mcp_preset',
+    description: 'Preset registry for reusable tool arguments.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['preset_upsert', 'preset_get', 'preset_list', 'preset_delete'] },
+        tool: { type: 'string' },
+        name: { type: 'string' },
+        preset: { type: 'object' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: 'mcp_audit',
+    description: 'Audit log access with filtering and tail support.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['audit_list', 'audit_tail', 'audit_clear', 'audit_stats'] },
+        limit: { type: 'integer' },
+        offset: { type: 'integer' },
+        reverse: { type: 'boolean' },
+        trace_id: { type: 'string' },
+        tool: { type: 'string' },
+        audit_action: { type: 'string' },
+        status: { type: 'string', enum: ['ok', 'error'] },
+        since: { type: 'string' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: 'mcp_pipeline',
+    description: 'Streaming pipelines between HTTP, SFTP, and PostgreSQL.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['run', 'describe'] },
+        flow: { type: 'string', enum: ['http_to_sftp', 'sftp_to_http', 'http_to_postgres', 'sftp_to_postgres'] },
+        http: { type: 'object' },
+        sftp: { type: 'object' },
+        postgres: { type: 'object' },
+        format: { type: 'string', enum: ['jsonl', 'csv'] },
+        batch_size: { type: 'integer' },
+        max_rows: { type: 'integer' },
+        csv_header: { type: 'boolean' },
+        csv_delimiter: { type: 'string' },
+        cache: { type: 'object' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: 'mcp_psql_manager',
+    description: 'PostgreSQL toolchain. Profile actions + query/batch/transaction + CRUD + select/count/exists/export helpers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test', 'query', 'batch', 'transaction', 'insert', 'insert_bulk', 'update', 'delete', 'select', 'count', 'exists', 'export', 'catalog_tables', 'catalog_columns', 'database_info'] },
+        profile_name: { type: 'string' },
+        include_secrets: { type: 'boolean' },
+        connection: { type: 'object' },
+        connection_url: { type: 'string' },
+        pool: { type: 'object' },
+        options: { type: 'object' },
         sql: { type: 'string' },
         params: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
-        table_name: { type: 'string' },
-        schema: { type: 'string', description: 'Optional schema name for table operations' },
-        data: { type: ['object', 'string', 'number', 'boolean'], description: 'Optional request body; objects are JSON-encoded' },
-        where: { type: 'string' },
-        limit: { type: 'integer' }
+        mode: { type: 'string', enum: ['rows', 'row', 'value', 'command'] },
+        timeout_ms: { type: 'integer' },
+        statements: { type: 'array', items: { type: 'object' } },
+        transactional: { type: 'boolean' },
+        table: { type: 'string' },
+        schema: { type: 'string' },
+        columns: { type: ['array', 'string'] },
+        columns_sql: { type: 'string' },
+        order_by: { type: ['array', 'object', 'string'] },
+        order_by_sql: { type: 'string' },
+        limit: { type: 'integer' },
+        offset: { type: 'integer' },
+        data: { type: 'object' },
+        rows: { type: 'array' },
+        filters: { type: ['object', 'array'] },
+        where_sql: { type: 'string' },
+        where_params: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
+        returning: { type: ['boolean', 'array', 'string'] },
+        file_path: { type: 'string' },
+        format: { type: 'string', enum: ['csv', 'jsonl'] },
+        batch_size: { type: 'integer' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
       },
-      required: ['action']
+      required: ['action'],
+      additionalProperties: true
     }
   },
   {
     name: 'mcp_ssh_manager',
-    description: 'SSH executor. setup_profile stores host credentials (password or PEM private_key with optional passphrase); data encrypted. list_profiles enumerates profiles, system_info returns collected facts, check_host validates reachability, execute runs one trimmed command (pipes/redirects allowed) sequentially per profile; no concurrent runs.',
+    description: 'SSH executor with profiles, exec/batch diagnostics, and SFTP helpers.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['setup_profile', 'list_profiles', 'execute', 'system_info', 'check_host'] },
-        profile_name: { type: 'string', description: "Profile name (defaults to 'default')" },
-        host: { type: 'string' },
-        port: { type: 'integer' },
-        username: { type: 'string' },
-        password: { type: 'string' },
-        private_key: { type: 'string', description: 'PEM encoded private key' },
-        passphrase: { type: 'string' },
-        ready_timeout: { type: 'integer' },
-        keepalive_interval: { type: 'integer' },
-        command: { type: 'string' }
+        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test', 'exec', 'batch', 'system_info', 'check_host', 'sftp_list', 'sftp_upload', 'sftp_download'] },
+        profile_name: { type: 'string' },
+        include_secrets: { type: 'boolean' },
+        connection: { type: 'object' },
+        command: { type: 'string' },
+        cwd: { type: 'string' },
+        env: { type: 'object' },
+        stdin: { type: 'string' },
+        timeout_ms: { type: 'integer' },
+        pty: { type: ['boolean', 'object'] },
+        commands: { type: 'array', items: { type: 'object' } },
+        parallel: { type: 'boolean' },
+        stop_on_error: { type: 'boolean' },
+        path: { type: 'string' },
+        remote_path: { type: 'string' },
+        local_path: { type: 'string' },
+        recursive: { type: 'boolean' },
+        max_depth: { type: 'integer' },
+        overwrite: { type: 'boolean' },
+        mkdirs: { type: 'boolean' },
+        preserve_mtime: { type: 'boolean' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
       },
-      required: ['action']
+      required: ['action'],
+      additionalProperties: true
     }
   },
   {
     name: 'mcp_api_client',
-    description: 'HTTP caller. Fields: action ∈ {get, post, put, delete, patch, check_api}, url (required), data (JSON body for mutating verbs), headers (string map), auth_token (prefixed into Authorization unless headers.Authorization supplied). Local URLs allowed. Responses are structured results or MCP errors.',
+    description: 'HTTP client with profiles, auth providers, retry/backoff, pagination, and downloads.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['get', 'post', 'put', 'delete', 'patch', 'check_api'] },
+        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'request', 'paginate', 'download', 'check'] },
+        profile_name: { type: 'string' },
+        include_secrets: { type: 'boolean' },
+        base_url: { type: 'string' },
         url: { type: 'string' },
-        data: { type: 'object' },
+        path: { type: 'string' },
+        query: { type: ['object', 'string'] },
+        method: { type: 'string' },
         headers: { type: 'object' },
-        auth_token: { type: 'string' }
+        auth: { type: ['string', 'object'] },
+        auth_provider: { type: 'object' },
+        body: { type: ['object', 'string', 'number', 'boolean', 'null'] },
+        data: { type: ['object', 'string', 'number', 'boolean', 'null'] },
+        body_type: { type: 'string' },
+        body_base64: { type: 'string' },
+        form: { type: 'object' },
+        timeout_ms: { type: 'integer' },
+        response_type: { type: 'string' },
+        redirect: { type: 'string' },
+        retry: { type: 'object' },
+        pagination: { type: 'object' },
+        cache: { type: ['boolean', 'object'] },
+        download_path: { type: 'string' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
       },
-      required: ['action']
+      required: ['action'],
+      additionalProperties: true
     }
   }
 ];
+
+const toolByName = Object.fromEntries(toolCatalog.map((tool) => [tool.name, tool]));
+toolCatalog.push(
+  { name: 'sql', description: 'Alias for mcp_psql_manager.', inputSchema: toolByName.mcp_psql_manager.inputSchema },
+  { name: 'psql', description: 'Alias for mcp_psql_manager.', inputSchema: toolByName.mcp_psql_manager.inputSchema },
+  { name: 'ssh', description: 'Alias for mcp_ssh_manager.', inputSchema: toolByName.mcp_ssh_manager.inputSchema },
+  { name: 'http', description: 'Alias for mcp_api_client.', inputSchema: toolByName.mcp_api_client.inputSchema },
+  { name: 'api', description: 'Alias for mcp_api_client.', inputSchema: toolByName.mcp_api_client.inputSchema },
+  { name: 'state', description: 'Alias for mcp_state.', inputSchema: toolByName.mcp_state.inputSchema },
+  { name: 'runbook', description: 'Alias for mcp_runbook.', inputSchema: toolByName.mcp_runbook.inputSchema },
+  { name: 'alias', description: 'Alias for mcp_alias.', inputSchema: toolByName.mcp_alias.inputSchema },
+  { name: 'preset', description: 'Alias for mcp_preset.', inputSchema: toolByName.mcp_preset.inputSchema },
+  { name: 'audit', description: 'Alias for mcp_audit.', inputSchema: toolByName.mcp_audit.inputSchema },
+  { name: 'pipeline', description: 'Alias for mcp_pipeline.', inputSchema: toolByName.mcp_pipeline.inputSchema }
+);
 
 class SentryFroggServer {
   constructor() {
     this.server = new Server(
       {
         name: 'sentryfrogg',
-        version: '4.2.0',
+        version: '6.1.0',
       },
       {
         capabilities: {
@@ -133,7 +385,7 @@ class SentryFroggServer {
       await this.setupHandlers();
       this.initialized = true;
       const logger = this.container.get('logger');
-      logger.info('SentryFrogg MCP Server v4.2.0 ready');
+      logger.info('SentryFrogg MCP Server v6.1.0 ready');
     } catch (error) {
       process.stderr.write(`Failed to initialize SentryFrogg MCP Server: ${error.message}\n`);
       throw error;
@@ -145,31 +397,39 @@ class SentryFroggServer {
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
+      const toolExecutor = this.container.get('toolExecutor');
 
       try {
         let result;
+        let payload;
+        const startedAt = Date.now();
         switch (name) {
-          case 'help':
+          case 'help': {
+            const traceId = args?.trace_id || crypto.randomUUID();
+            const spanId = args?.span_id || crypto.randomUUID();
+            const parentSpanId = args?.parent_span_id;
             result = this.handleHelp(args);
+            payload = await toolExecutor.wrapResult({
+              tool: name,
+              args,
+              result,
+              startedAt,
+              traceId,
+              spanId,
+              parentSpanId,
+            });
             break;
-          case 'mcp_psql_manager':
-            result = await this.handlePostgreSQL(args);
-            break;
-          case 'mcp_ssh_manager':
-            result = await this.handleSSH(args);
-            break;
-          case 'mcp_api_client':
-            result = await this.handleAPI(args);
-            break;
+          }
           default:
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+            payload = await toolExecutor.execute(name, args);
+            break;
         }
 
         return {
           content: [
             {
               type: 'text',
-              text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+              text: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2),
             },
           ],
         };
@@ -206,20 +466,44 @@ class SentryFroggServer {
     const tool = args.tool?.toLowerCase();
     const summaries = {
       help: {
-        description: 'Показывает справку. Вы можете передать `tool` чтобы получить сведения о конкретном инструменте.',
+        description: 'Показывает справку. Передайте `tool`, чтобы получить детали по инструменту.',
         usage: "call_tool → name: 'help', arguments: { tool?: string }",
       },
       mcp_psql_manager: {
-        description: 'Управление PostgreSQL: профили, запросы, CRUD, метаданные.',
-        usage: "setup_profile → quick_query/show_tables/describe_table/sample_data/insert/update/delete/database_info",
+        description: 'PostgreSQL: профили, запросы, транзакции, CRUD, select/count/exists/export + bulk insert.',
+        usage: "profile_upsert/profile_list → query/batch/transaction → insert/insert_bulk/update/delete/select/count/exists/export",
       },
       mcp_ssh_manager: {
-        description: 'Выполнение SSH команд и диагностика хоста по профилю.',
-        usage: "setup_profile → execute/system_info/check_host/list_profiles",
+        description: 'SSH: профили, exec/batch, диагностика и SFTP.',
+        usage: "profile_upsert/profile_list → exec/batch/system_info/check_host/sftp_*",
       },
       mcp_api_client: {
-        description: 'HTTP клиент с поддержкой токенов, заголовков и JSON-данных.',
-        usage: "action: get/post/put/delete/patch/check_api + url [+ data/headers/auth_token]",
+        description: 'HTTP: профили, request/paginate/download, retry/backoff, auth providers + cache.',
+        usage: "profile_upsert/profile_list → request/paginate/download/check",
+      },
+      mcp_state: {
+        description: 'State: переменные между вызовами, поддержка session/persistent.',
+        usage: 'set/get/list/unset/clear/dump',
+      },
+      mcp_runbook: {
+        description: 'Runbooks: хранение и выполнение многошаговых сценариев, плюс DSL.',
+        usage: 'runbook_upsert/runbook_upsert_dsl/runbook_list → runbook_run/runbook_run_dsl',
+      },
+      mcp_alias: {
+        description: 'Aliases: короткие имена для инструментов и аргументов.',
+        usage: 'alias_upsert/alias_list/alias_get/alias_delete',
+      },
+      mcp_preset: {
+        description: 'Presets: reusable наборы аргументов для инструментов.',
+        usage: 'preset_upsert/preset_list/preset_get/preset_delete',
+      },
+      mcp_audit: {
+        description: 'Audit log: просмотр и фильтрация событий.',
+        usage: 'audit_list/audit_tail/audit_stats/audit_clear',
+      },
+      mcp_pipeline: {
+        description: 'Pipelines: потоковые HTTP↔SFTP↔PostgreSQL сценарии.',
+        usage: 'run/describe',
       },
     };
 
@@ -228,7 +512,7 @@ class SentryFroggServer {
     }
 
     return {
-      overview: 'SentryFrogg MCP подключает PostgreSQL, SSH и HTTP инструменты. Сначала настройте профиль (setup_profile), затем запускайте операции.',
+      overview: 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, runbook, alias, preset, audit и pipeline инструменты. Можно использовать профиль или inline-подключение в каждом вызове.',
       tools: Object.entries(summaries).map(([key, value]) => ({
         name: key,
         description: value.description,
@@ -273,7 +557,7 @@ class SentryFroggServer {
     }
 
     return {
-      version: '4.2.0',
+      version: '6.1.0',
       architecture: 'lightweight-service-layer',
       ...ServiceBootstrap.getStats(),
     };

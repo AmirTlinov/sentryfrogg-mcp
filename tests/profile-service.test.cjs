@@ -42,12 +42,16 @@ test('ProfileService can remove stored secrets via null payload', async (t) => {
 
   await service.setProfile('analytics', {
     type: 'postgresql',
-    host: 'db.local',
-    port: 5432,
-    username: 'service',
-    database: 'warehouse',
-    ssl: false,
-    password: 'initial-secret',
+    data: {
+      host: 'db.local',
+      port: 5432,
+      username: 'service',
+      database: 'warehouse',
+      ssl: false,
+    },
+    secrets: {
+      password: 'initial-secret',
+    },
   });
 
   const stored = service.profiles.get('analytics');
@@ -55,12 +59,9 @@ test('ProfileService can remove stored secrets via null payload', async (t) => {
 
   await service.setProfile('analytics', {
     type: 'postgresql',
-    host: 'db.local',
-    port: 5432,
-    username: 'service',
-    database: 'warehouse',
-    ssl: false,
-    password: null,
+    secrets: {
+      password: null,
+    },
   });
 
   const updated = service.profiles.get('analytics');

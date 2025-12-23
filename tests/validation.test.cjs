@@ -21,19 +21,18 @@ test('ensureString rejects whitespace-only secret even without trimming', () => 
   assert.throws(() => validation.ensureString('   ', 'Secret', { trim: false }), /must be a non-empty string/);
 });
 
-test('ensureConnectionProfile keeps password untouched but normalizes other fields', () => {
+test('ensureHeaders normalizes values to strings and drops nulls', () => {
   const validation = createValidation();
-  const profile = {
-    host: 'db.example.com ',
-    port: '2200',
-    username: ' admin ',
-    password: ' pass-with-space ',
-  };
+  const headers = validation.ensureHeaders({
+    Accept: 'application/json',
+    'X-Count': 12,
+    'X-Flag': false,
+    'X-Empty': null,
+  });
 
-  const normalized = validation.ensureConnectionProfile(profile, { defaultPort: 22, requirePassword: true });
-
-  assert.strictEqual(normalized.host, 'db.example.com');
-  assert.strictEqual(normalized.port, 2200);
-  assert.strictEqual(normalized.username, 'admin');
-  assert.strictEqual(normalized.password, ' pass-with-space ');
+  assert.deepEqual(headers, {
+    Accept: 'application/json',
+    'X-Count': '12',
+    'X-Flag': 'false',
+  });
 });

@@ -24,13 +24,6 @@ class Validation {
     return trim ? normalized : value;
   }
 
-  ensureOptionalString(value, label, options) {
-    if (value === undefined || value === null) {
-      return undefined;
-    }
-    return this.ensureString(value, label, options);
-  }
-
   ensurePort(port, fallback) {
     if (port === undefined || port === null || port === '') {
       return fallback;
@@ -43,25 +36,10 @@ class Validation {
     return numeric;
   }
 
-  ensureLimit(limit, defaultValue = Constants.LIMITS.DEFAULT_QUERY_LIMIT) {
-    if (limit === undefined || limit === null) {
-      return defaultValue;
-    }
-    const numeric = Number(limit);
-    if (!Number.isInteger(numeric) || numeric < Constants.LIMITS.MIN_QUERY_LIMIT || numeric > Constants.LIMITS.MAX_QUERY_LIMIT) {
-      throw new Error(`Limit must be between ${Constants.LIMITS.MIN_QUERY_LIMIT} and ${Constants.LIMITS.MAX_QUERY_LIMIT}`);
-    }
-    return numeric;
-  }
-
   ensureIdentifier(name, label) {
     const trimmed = this.ensureString(name, label);
-    const pattern = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-    if (!pattern.test(trimmed)) {
-      throw new Error(`${label} may contain only letters, digits and underscores, starting with letter or underscore`);
-    }
-    if (trimmed.length > Constants.LIMITS.MAX_TABLE_NAME_LENGTH) {
-      throw new Error(`${label} must be ${Constants.LIMITS.MAX_TABLE_NAME_LENGTH} characters or less`);
+    if (trimmed.includes('\0')) {
+      throw new Error(`${label} must not contain null bytes`);
     }
     return trimmed;
   }
@@ -84,38 +62,8 @@ class Validation {
     return data;
   }
 
-  ensureConnectionProfile(profile, { requireDatabase = false, defaultPort, requirePassword = true } = {}) {
-    if (typeof profile !== 'object' || profile === null) {
-      throw new Error('Profile must be an object');
-    }
-
-    const normalized = {
-      host: this.ensureString(profile.host, 'Host'),
-      port: this.ensurePort(profile.port, defaultPort),
-      username: this.ensureString(profile.username, 'Username'),
-    };
-
-    if (requirePassword) {
-      normalized.password = this.ensureString(profile.password, 'Password', { trim: false });
-    } else if (profile.password !== undefined) {
-      normalized.password = this.ensureString(profile.password, 'Password', { trim: false });
-    }
-
-    if (requireDatabase) {
-      normalized.database = this.ensureString(profile.database, 'Database name');
-    } else if (profile.database) {
-      normalized.database = this.ensureString(profile.database, 'Database name');
-    }
-
-    return normalized;
-  }
-
   ensureSql(sql) {
     return this.ensureString(sql, 'SQL query');
-  }
-
-  ensureWhereClause(where) {
-    return this.ensureString(where, 'WHERE clause');
   }
 
   ensureHeaders(headers) {
@@ -129,8 +77,13 @@ class Validation {
 
     return Object.fromEntries(
       Object.entries(headers)
-        .filter(([key, value]) => typeof key === 'string' && typeof value === 'string')
-        .map(([key, value]) => [key.trim(), value.trim()])
+        .filter(([key]) => typeof key === 'string' && key.trim().length > 0)
+        .flatMap(([key, value]) => {
+          if (value === undefined || value === null) {
+            return [];
+          }
+          return [[key.trim(), String(value).trim()]];
+        })
     );
   }
 }

@@ -1,15 +1,17 @@
 {
-  "example": {
+  "example-postgres": {
     "type": "postgresql",
-    "host": "db.internal",
-    "port": 5432,
-    "username": "service",
-    "database": "core",
-    "ssl": true,
-    "created_at": "2025-01-01T00:00:00.000Z",
-    "updated_at": "2025-01-01T00:00:00.000Z",
+    "data": {
+      "host": "db.internal",
+      "port": 5432,
+      "username": "service",
+      "database": "core",
+      "ssl": { "enabled": true }
+    },
     "secrets": {
       "password": "<encrypted-placeholder>"
-    }
+    },
+    "created_at": "2025-01-01T00:00:00.000Z",
+    "updated_at": "2025-01-01T00:00:00.000Z"
   }
 }

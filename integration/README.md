@@ -61,17 +61,19 @@ docker compose -f integration/docker-compose.yml down -v
 
 ## Использование с MCP инструментами
 
-После запуска стенда можно вызывать `setup_profile` с параметрами:
+После запуска стенда можно вызывать `profile_upsert` с параметрами:
 
 ```json
 {
-  "action": "setup_profile",
+  "action": "profile_upsert",
   "profile_name": "integration",
-  "host": "127.0.0.1",
-  "port": 5432,
-  "username": "mcp_user",
-  "password": "mcp_pass",
-  "database": "mcp_demo"
+  "connection": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "username": "mcp_user",
+    "password": "mcp_pass",
+    "database": "mcp_demo"
+  }
 }
 ```
 
@@ -79,11 +81,13 @@ docker compose -f integration/docker-compose.yml down -v
 
 ```json
 {
-  "action": "setup_profile",
+  "action": "profile_upsert",
   "profile_name": "integration-ssh",
-  "host": "127.0.0.1",
-  "port": 2222,
-  "username": "mcp",
-  "password": "mcp_pass"
+  "connection": {
+    "host": "127.0.0.1",
+    "port": 2222,
+    "username": "mcp",
+    "password": "mcp_pass"
+  }
 }
 ```

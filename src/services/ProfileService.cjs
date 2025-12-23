@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * 👤 Управление профилями подключения (PostgreSQL, SSH, HTTP)
+ * 👤 Управление профилями подключения.
  */
 
 const fs = require('fs/promises');
@@ -15,7 +15,6 @@ class ProfileService {
     this.baseDir = resolveProfileBaseDir();
     this.filePath = path.join(this.baseDir, 'profiles.json');
     this.profiles = new Map();
-    this.secretFields = ['password', 'private_key', 'passphrase', 'token', 'ssl_ca', 'ssl_cert', 'ssl_key', 'ssl_passphrase'];
     this.stats = {
       created: 0,
       updated: 0,
@@ -31,11 +30,34 @@ class ProfileService {
     await this.initPromise;
   }
 
+  ensurePlainObject(value, label) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error(`${label} must be an object`);
+    }
+    return value;
+  }
+
+  validateStoredProfile(name, profile) {
+    if (!profile || typeof profile !== 'object') {
+      throw new Error(`Profile '${name}' has invalid format`);
+    }
+    if (typeof profile.type !== 'string' || profile.type.trim().length === 0) {
+      throw new Error(`Profile '${name}' is missing type`);
+    }
+    if (profile.data && (typeof profile.data !== 'object' || Array.isArray(profile.data))) {
+      throw new Error(`Profile '${name}' has invalid data section`);
+    }
+    if (profile.secrets && (typeof profile.secrets !== 'object' || Array.isArray(profile.secrets))) {
+      throw new Error(`Profile '${name}' has invalid secrets section`);
+    }
+  }
+
   async loadProfiles() {
     try {
       const raw = await fs.readFile(this.filePath, 'utf8');
       const parsed = JSON.parse(raw);
       for (const [name, profile] of Object.entries(parsed)) {
+        this.validateStoredProfile(name, profile);
         this.profiles.set(name, profile);
       }
       this.stats.loaded = this.profiles.size;
@@ -62,6 +84,19 @@ class ProfileService {
     await this.initPromise;
   }
 
+  async encryptSecret(value, label) {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (value === null || value === '') {
+      return null;
+    }
+    if (typeof value !== 'string') {
+      throw new Error(`${label} must be a string`);
+    }
+    return this.security.encrypt(value);
+  }
+
   async setProfile(name, config) {
     await this.ensureReady();
 
@@ -69,21 +104,15 @@ class ProfileService {
       throw new Error('Profile name must be a non-empty string');
     }
 
-    if (typeof config !== 'object' || config === null) {
-      throw new Error('Profile config must be an object');
-    }
+    this.ensurePlainObject(config, 'Profile config');
 
     const trimmedName = name.trim();
     const existing = this.profiles.get(trimmedName) || {};
+    const incomingData = config.data ? this.ensurePlainObject(config.data, 'Profile data') : undefined;
 
     const profile = {
       type: config.type || existing.type,
-      host: config.host ?? existing.host,
-      port: config.port ?? existing.port,
-      username: config.username ?? existing.username,
-      database: config.database ?? existing.database,
-      ssl: config.ssl ?? existing.ssl,
-      options: config.options ?? existing.options,
+      data: { ...(existing.data || {}) },
       created_at: existing.created_at || new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -92,28 +121,33 @@ class ProfileService {
       throw new Error('Profile type must be specified');
     }
 
-    const encryptedSecrets = {};
-    const requestedFields = new Set(
-      Object.keys(config).filter((key) => this.secretFields.includes(key))
-    );
-    for (const field of this.secretFields) {
-      if (Object.prototype.hasOwnProperty.call(config, field)) {
-        const value = config[field];
-        if (value === null || value === '') {
+    if (incomingData) {
+      for (const [key, value] of Object.entries(incomingData)) {
+        if (value === undefined) {
           continue;
         }
-        encryptedSecrets[field] = await this.security.encrypt(value);
-      } else if (existing.secrets?.[field]) {
-        encryptedSecrets[field] = existing.secrets[field];
-      } else if (existing[field]) {
-        // legacy формат, мигрируем
-        encryptedSecrets[field] = existing[field];
+        profile.data[key] = value;
       }
     }
 
-    if (Object.keys(encryptedSecrets).length > 0) {
-      profile.secrets = encryptedSecrets;
-    } else if (requestedFields.size > 0 || profile.secrets) {
+    let secrets = existing.secrets ? { ...existing.secrets } : {};
+    if (config.secrets === null) {
+      secrets = {};
+    } else if (config.secrets !== undefined) {
+      const incomingSecrets = this.ensurePlainObject(config.secrets, 'Profile secrets');
+      for (const [key, rawValue] of Object.entries(incomingSecrets)) {
+        const encrypted = await this.encryptSecret(rawValue, `Secret '${key}'`);
+        if (encrypted === null) {
+          delete secrets[key];
+        } else if (encrypted !== undefined) {
+          secrets[key] = encrypted;
+        }
+      }
+    }
+
+    if (Object.keys(secrets).length > 0) {
+      profile.secrets = secrets;
+    } else {
       delete profile.secrets;
     }
 
@@ -131,11 +165,9 @@ class ProfileService {
     return {
       name: trimmedName,
       type: profile.type,
-      host: profile.host,
-      port: profile.port,
-      username: profile.username,
-      database: profile.database,
-      ssl: profile.ssl,
+      data: profile.data,
+      created_at: profile.created_at,
+      updated_at: profile.updated_at,
     };
   }
 
@@ -159,26 +191,15 @@ class ProfileService {
     const result = {
       name: key,
       type: entry.type,
-      host: entry.host,
-      port: entry.port,
-      username: entry.username,
-      database: entry.database,
-      ssl: entry.ssl,
-      options: entry.options,
+      data: { ...(entry.data || {}) },
     };
 
     if (entry.secrets) {
+      const decrypted = {};
       for (const [field, value] of Object.entries(entry.secrets)) {
-        try {
-          result[field] = await this.security.decrypt(value);
-        } catch (error) {
-          this.logger.warn('Failed to decrypt profile field', { name: key, field, error: error.message });
-        }
+        decrypted[field] = await this.security.decrypt(value);
       }
-    } else if (entry.password && entry.encrypted !== false) {
-      result.password = await this.security.decrypt(entry.password);
-    } else if (entry.password) {
-      result.password = entry.password;
+      result.secrets = decrypted;
     }
 
     return result;
@@ -195,11 +216,7 @@ class ProfileService {
       items.push({
         name,
         type: profile.type,
-        host: profile.host,
-        port: profile.port,
-        username: profile.username,
-        database: profile.database,
-        ssl: profile.ssl,
+        data: profile.data || {},
         created_at: profile.created_at,
         updated_at: profile.updated_at,
       });

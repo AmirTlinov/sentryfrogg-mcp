@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * 🔐 Упрощённая система безопасности
- * Держит совместимость с профилями и минимально проверяет ввод.
+ * 🔐 Упрощённая система безопасности.
  */
 
 const crypto = require('crypto');
@@ -12,6 +11,7 @@ const { resolveProfileKeyPath } = require('../utils/paths.cjs');
 
 const KEY_BYTES = Constants.BUFFERS.CRYPTO_KEY_SIZE;
 const IV_BYTES = Constants.BUFFERS.CRYPTO_IV_SIZE;
+const TAG_BYTES = Constants.BUFFERS.CRYPTO_TAG_SIZE;
 
 function decodeKey(raw) {
   if (!raw) {
@@ -45,12 +45,6 @@ class Security {
     this.algorithm = Constants.CRYPTO.ALGORITHM;
     this.keyPath = resolveProfileKeyPath();
     this.secretKey = this.loadOrCreateSecret();
-    this.limits = {
-      maxDataSize: Constants.LIMITS.MAX_DATA_SIZE,
-      maxPasswordLength: Constants.LIMITS.MAX_PASSWORD_LENGTH,
-      maxCommandLength: Constants.LIMITS.MAX_COMMAND_LENGTH,
-      maxUrlLength: Constants.LIMITS.MAX_URL_LENGTH,
-    };
   }
 
   loadOrCreateSecret() {
@@ -83,24 +77,16 @@ class Security {
     return generated;
   }
 
-  ensureSizeFits(text) {
-    const size = Buffer.byteLength(String(text), 'utf8');
-    if (size > this.limits.maxDataSize) {
-      throw new Error(`Payload too large (${size} bytes)`);
-    }
-  }
-
   async encrypt(text) {
     if (typeof text !== 'string') {
       text = String(text ?? '');
     }
 
-    this.ensureSizeFits(text);
-
     const iv = crypto.randomBytes(IV_BYTES);
     const cipher = crypto.createCipheriv(this.algorithm, this.secretKey, iv);
     const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
-    return `${iv.toString('hex')}:${encrypted.toString('hex')}`;
+    const tag = cipher.getAuthTag();
+    return `${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
   }
 
   async decrypt(payload) {
@@ -108,19 +94,24 @@ class Security {
       throw new Error('Encrypted payload must be a string');
     }
 
-    const [ivHex, dataHex] = payload.split(':');
-    if (!ivHex || !dataHex) {
+    const [ivHex, tagHex, dataHex] = payload.split(':');
+    if (!ivHex || !tagHex || !dataHex) {
       throw new Error('Invalid encrypted payload format');
     }
 
     try {
       const iv = Buffer.from(ivHex, 'hex');
+      const tag = Buffer.from(tagHex, 'hex');
       const encrypted = Buffer.from(dataHex, 'hex');
+      if (tag.length !== TAG_BYTES) {
+        throw new Error('Invalid auth tag length');
+      }
       const decipher = crypto.createDecipheriv(this.algorithm, this.secretKey, iv);
+      decipher.setAuthTag(tag);
       const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
       return decrypted.toString('utf8');
     } catch (error) {
-      throw new Error('Failed to decrypt profile password');
+      throw new Error('Failed to decrypt secret payload');
     }
   }
 
@@ -134,10 +125,6 @@ class Security {
       throw new Error('Command must not be empty');
     }
 
-    if (trimmed.length > this.limits.maxCommandLength) {
-      throw new Error(`Command is too long (>${this.limits.maxCommandLength} characters)`);
-    }
-
     if (trimmed.includes('\0')) {
       throw new Error('Command contains null bytes');
     }
@@ -148,10 +135,6 @@ class Security {
   ensureUrl(url) {
     if (typeof url !== 'string') {
       throw new Error('URL must be a string');
-    }
-
-    if (url.length > this.limits.maxUrlLength) {
-      throw new Error('URL is too long');
     }
 
     try {

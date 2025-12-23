@@ -14,7 +14,7 @@ fields:
 project:
   enabled: true
   number: null
-  owner: iMAGRAY
-  repo: PSQL_SSH_API_MCP
+  owner: AmirTlinov
+  repo: SentryFrogg-MCP
   type: repository
   workers: 0
