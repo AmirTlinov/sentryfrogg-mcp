@@ -5,7 +5,9 @@
  */
 
 const fs = require('fs/promises');
+const { createReadStream } = require('fs');
 const path = require('path');
+const readline = require('readline');
 const { resolveAuditPath } = require('../utils/paths.cjs');
 
 class AuditService {
@@ -24,8 +26,13 @@ class AuditService {
   async append(entry) {
     const payload = `${JSON.stringify(entry)}\n`;
     const write = async () => {
-      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fs.appendFile(this.filePath, payload, 'utf8');
+      await fs.mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+      await fs.appendFile(this.filePath, payload, { encoding: 'utf8', mode: 0o600 });
+      try {
+        await fs.chmod(this.filePath, 0o600);
+      } catch (error) {
+        // Best-effort (Windows/FS policies).
+      }
       this.stats.logged += 1;
     };
 
@@ -102,28 +109,110 @@ class AuditService {
     });
   }
 
+  buildFilter(filters = {}) {
+    const normalized = {
+      trace_id: filters.trace_id,
+      tool: filters.tool,
+      action: filters.action,
+      status: filters.status,
+      since: filters.since,
+    };
+
+    let sinceTime = null;
+    if (normalized.since) {
+      const parsed = Date.parse(normalized.since);
+      if (!Number.isNaN(parsed)) {
+        sinceTime = parsed;
+      }
+    }
+
+    const matches = (entry) => {
+      if (normalized.trace_id && entry.trace_id !== normalized.trace_id) {
+        return false;
+      }
+      if (normalized.tool && entry.tool !== normalized.tool) {
+        return false;
+      }
+      if (normalized.action && entry.action !== normalized.action) {
+        return false;
+      }
+      if (normalized.status && entry.status !== normalized.status) {
+        return false;
+      }
+      if (sinceTime) {
+        const ts = Date.parse(entry.timestamp);
+        if (!Number.isNaN(ts) && ts < sinceTime) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    return { normalized, sinceTime, matches };
+  }
+
   async readEntries({ limit = 100, offset = 0, reverse = false, filters = {} } = {}) {
-    let raw = '';
+    const safeLimit = Number.isInteger(limit) ? Math.max(0, limit) : 100;
+    const safeOffset = Number.isInteger(offset) ? Math.max(0, offset) : 0;
+    const bufferSize = reverse ? safeLimit + safeOffset : 0;
+    const { matches } = this.buildFilter(filters);
+
+    let total = 0;
+    const collected = [];
+
     try {
-      raw = await fs.readFile(this.filePath, 'utf8');
+      const stream = createReadStream(this.filePath, { encoding: 'utf8' });
+      try {
+        const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        for await (const line of rl) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+          let entry;
+          try {
+            entry = JSON.parse(trimmed);
+          } catch (error) {
+            this.logger.warn('Skipping invalid audit entry', { error: error.message });
+            continue;
+          }
+          if (!matches(entry)) {
+            continue;
+          }
+
+          total += 1;
+
+          if (reverse) {
+            if (bufferSize > 0) {
+              collected.push(entry);
+              if (collected.length > bufferSize) {
+                collected.shift();
+              }
+            }
+            continue;
+          }
+
+          const index = total - 1;
+          if (index >= safeOffset && collected.length < safeLimit) {
+            collected.push(entry);
+          }
+        }
+      } finally {
+        stream.destroy();
+      }
     } catch (error) {
       if (error.code !== 'ENOENT') {
         throw error;
       }
     }
 
-    let entries = this.parseEntries(raw);
-    entries = this.filterEntries(entries, filters);
-
+    let entries = collected;
     if (reverse) {
-      entries = entries.reverse();
+      entries = collected.slice().reverse().slice(safeOffset, safeOffset + safeLimit);
     }
 
-    const total = entries.length;
-    const sliced = entries.slice(offset, offset + limit);
-
     this.stats.reads += 1;
-    return { success: true, total, offset, limit, entries: sliced };
+    return { success: true, total, offset: safeOffset, limit: safeLimit, entries };
   }
 
   getStats() {

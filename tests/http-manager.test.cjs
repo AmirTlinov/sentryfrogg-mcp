@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
 const APIManager = require('../src/managers/APIManager.cjs');
 
 const loggerStub = {
@@ -106,4 +109,30 @@ test('APIManager paginates using page-based pagination', async () => {
 
   assert.equal(result.page_count, 3);
   assert.deepEqual(result.items, [1, 2]);
+});
+
+test('APIManager download refuses to overwrite local files by default', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-download-'));
+  const targetPath = path.join(dir, 'report.txt');
+  await fs.writeFile(targetPath, 'old');
+
+  const fetchStub = async () => createResponse({ status: 200, body: 'new' });
+  const manager = new APIManager(loggerStub, securityStub, validationStub, profileServiceStub(), null, { fetch: fetchStub });
+
+  await assert.rejects(
+    () => manager.download({ method: 'GET', url: 'https://example.com/report', download_path: targetPath }),
+    /Local path already exists/
+  );
+
+  const result = await manager.download({
+    method: 'GET',
+    url: 'https://example.com/report',
+    download_path: targetPath,
+    overwrite: true,
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'new');
+
+  await fs.rm(dir, { recursive: true, force: true });
 });

@@ -5,8 +5,8 @@
  */
 
 const fs = require('fs/promises');
-const path = require('path');
 const { resolveRunbooksPath } = require('../utils/paths.cjs');
+const { atomicWriteTextFile } = require('../utils/fsAtomic.cjs');
 
 class RunbookService {
   constructor(logger) {
@@ -42,9 +42,8 @@ class RunbookService {
   }
 
   async persist() {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     const data = Object.fromEntries(this.runbooks);
-    await fs.writeFile(this.filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+    await atomicWriteTextFile(this.filePath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
     this.stats.saved += 1;
   }
 

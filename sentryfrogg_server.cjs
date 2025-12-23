@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// SentryFrogg MCP Server v6.1
+// SentryFrogg MCP Server v6.3.0
 
 process.on('unhandledRejection', (reason, promise) => {
   process.stderr.write(`🔥 Unhandled Promise Rejection: ${reason}\n`);
@@ -257,6 +257,7 @@ const toolCatalog = [
         where_params: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
         returning: { type: ['boolean', 'array', 'string'] },
         file_path: { type: 'string' },
+        overwrite: { type: 'boolean' },
         format: { type: 'string', enum: ['csv', 'jsonl'] },
         batch_size: { type: 'integer' },
         output: outputSchema,
@@ -341,6 +342,7 @@ const toolCatalog = [
         pagination: { type: 'object' },
         cache: { type: ['boolean', 'object'] },
         download_path: { type: 'string' },
+        overwrite: { type: 'boolean' },
         output: outputSchema,
         store_as: { type: ['string', 'object'] },
         store_scope: { type: 'string', enum: ['session', 'persistent'] },
@@ -376,7 +378,7 @@ class SentryFroggServer {
     this.server = new Server(
       {
         name: 'sentryfrogg',
-        version: '6.2.1',
+        version: '6.3.0',
       },
       {
         capabilities: {
@@ -395,7 +397,7 @@ class SentryFroggServer {
       await this.setupHandlers();
       this.initialized = true;
       const logger = this.container.get('logger');
-      logger.info('SentryFrogg MCP Server v6.2.1 ready');
+      logger.info('SentryFrogg MCP Server v6.3.0 ready');
     } catch (error) {
       process.stderr.write(`Failed to initialize SentryFrogg MCP Server: ${error.message}\n`);
       throw error;
@@ -567,7 +569,7 @@ class SentryFroggServer {
     }
 
     return {
-      version: '6.2.1',
+      version: '6.3.0',
       architecture: 'lightweight-service-layer',
       ...ServiceBootstrap.getStats(),
     };

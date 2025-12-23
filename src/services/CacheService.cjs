@@ -9,6 +9,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const { createWriteStream } = require('fs');
 const { resolveCacheDir } = require('../utils/paths.cjs');
+const { atomicReplaceFile, atomicWriteTextFile, tempSiblingPath } = require('../utils/fsAtomic.cjs');
 
 class CacheService {
   constructor(logger) {
@@ -142,7 +143,6 @@ class CacheService {
   }
 
   async setJson(key, value, meta = {}) {
-    await fs.mkdir(this.cacheDir, { recursive: true });
     const payload = {
       type: 'json',
       created_at: new Date().toISOString(),
@@ -150,26 +150,26 @@ class CacheService {
       meta: meta.meta,
       value,
     };
-    await fs.writeFile(this.entryPath(key), `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    await atomicWriteTextFile(this.entryPath(key), `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
     this.stats.writes += 1;
     return payload;
   }
 
   async createFileWriter(key, meta = {}) {
     key = this.ensureKey(key);
-    await fs.mkdir(this.cacheDir, { recursive: true });
-    const tmpPath = `${this.dataPath(key)}.part-${Date.now()}`;
-    const stream = createWriteStream(tmpPath);
+    await fs.mkdir(this.cacheDir, { recursive: true, mode: 0o700 });
+    const tmpPath = tempSiblingPath(this.dataPath(key), '.part');
+    const stream = createWriteStream(tmpPath, { mode: 0o600 });
 
     const finalize = async () => {
-      await fs.rename(tmpPath, this.dataPath(key));
+      await atomicReplaceFile(tmpPath, this.dataPath(key), { overwrite: true, mode: 0o600 });
       const payload = {
         type: 'file',
         created_at: new Date().toISOString(),
         ttl_ms: meta.ttl_ms,
         meta: meta.meta,
       };
-      await fs.writeFile(this.entryPath(key), `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+      await atomicWriteTextFile(this.entryPath(key), `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
       this.stats.writes += 1;
       return payload;
     };

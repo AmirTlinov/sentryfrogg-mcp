@@ -279,9 +279,13 @@ Export example:
   "table": "orders",
   "format": "csv",
   "file_path": "/tmp/orders.csv",
+  "overwrite": true,
   "batch_size": 1000
 }
 ```
+
+Note:
+- `export` refuses to overwrite an existing `file_path` unless `overwrite: true`.
 
 ## `mcp_ssh_manager`
 
@@ -418,9 +422,13 @@ Download example:
   "action": "download",
   "method": "GET",
   "url": "https://example.com/report.csv",
-  "download_path": "/tmp/report.csv"
+  "download_path": "/tmp/report.csv",
+  "overwrite": true
 }
 ```
+
+Note:
+- `download` refuses to overwrite an existing `download_path` unless `overwrite: true`.
 
 Auth provider (exec) example:
 

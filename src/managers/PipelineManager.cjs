@@ -219,8 +219,13 @@ class PipelineManager {
         meta: { url: config.url, method: config.method },
       });
 
-      await pipeline(stream, writer.stream);
-      await writer.finalize();
+      try {
+        await pipeline(stream, writer.stream);
+        await writer.finalize();
+      } catch (error) {
+        await writer.abort();
+        throw error;
+      }
 
       await this.auditStage('http_cache_store', trace, { url: config.url, cache_key: cacheKey });
 

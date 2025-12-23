@@ -5,8 +5,8 @@
  */
 
 const fs = require('fs/promises');
-const path = require('path');
 const { resolvePresetsPath } = require('../utils/paths.cjs');
+const { atomicWriteTextFile } = require('../utils/fsAtomic.cjs');
 
 class PresetService {
   constructor(logger) {
@@ -52,12 +52,11 @@ class PresetService {
   }
 
   async persist() {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     const output = {};
     for (const [tool, bucket] of this.presets.entries()) {
       output[tool] = Object.fromEntries(bucket.entries());
     }
-    await fs.writeFile(this.filePath, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
+    await atomicWriteTextFile(this.filePath, `${JSON.stringify(output, null, 2)}\n`, { mode: 0o600 });
     this.stats.saved += 1;
   }
 

@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
 const PostgreSQLManager = require('../src/managers/PostgreSQLManager.cjs');
 
 const loggerStub = {
@@ -149,4 +152,43 @@ test('update and delete allow missing filters', async () => {
 
   assert.ok(!capturedUpdateSql.includes('WHERE'));
   assert.ok(!capturedDeleteSql.includes('WHERE'));
+});
+
+test('export refuses to overwrite local files by default', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-export-'));
+  const targetPath = path.join(dir, 'export.csv');
+  await fs.writeFile(targetPath, 'old');
+
+  const service = profileServiceStub();
+  const manager = new PostgreSQLManager(loggerStub, validationStub, service);
+
+  manager.exportToStream = async (args, stream) => new Promise((resolve, reject) => {
+    stream.write('id,name\n1,alpha\n', (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      stream.end(() => {
+        resolve({
+          success: true,
+          table: 'items',
+          schema: 'public',
+          format: 'csv',
+          rows_written: 1,
+          duration_ms: 1,
+        });
+      });
+    });
+  });
+
+  await assert.rejects(
+    () => manager.exportData({ file_path: targetPath }),
+    /Local path already exists/
+  );
+
+  const result = await manager.exportData({ file_path: targetPath, overwrite: true });
+  assert.equal(result.success, true);
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'id,name\n1,alpha\n');
+
+  await fs.rm(dir, { recursive: true, force: true });
 });

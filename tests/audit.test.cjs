@@ -60,3 +60,59 @@ test('Audit log redacts sensitive fields', async () => {
   process.env.MCP_AUDIT_PATH = original;
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test('AuditService streams entries with reverse/offset/filters', async () => {
+  const dir = await createTempDir();
+  const auditPath = path.join(dir, 'audit.jsonl');
+  const original = process.env.MCP_AUDIT_PATH;
+  process.env.MCP_AUDIT_PATH = auditPath;
+
+  const auditService = new AuditService(loggerStub);
+
+  await auditService.append({
+    timestamp: '2025-01-01T00:00:00.000Z',
+    status: 'ok',
+    tool: 'mcp_state',
+    action: 'set',
+    trace_id: 't1',
+  });
+  await auditService.append({
+    timestamp: '2025-01-02T00:00:00.000Z',
+    status: 'error',
+    tool: 'mcp_api_client',
+    action: 'request',
+    trace_id: 't2',
+  });
+  await auditService.append({
+    timestamp: '2025-01-03T00:00:00.000Z',
+    status: 'ok',
+    tool: 'mcp_api_client',
+    action: 'request',
+    trace_id: 't3',
+  });
+
+  await fs.appendFile(auditPath, 'not-json\n', 'utf8');
+
+  const forward = await auditService.readEntries({ limit: 2, offset: 0 });
+  assert.equal(forward.total, 3);
+  assert.deepEqual(forward.entries.map((entry) => entry.trace_id), ['t1', 't2']);
+
+  const reverse = await auditService.readEntries({ limit: 2, offset: 0, reverse: true });
+  assert.equal(reverse.total, 3);
+  assert.deepEqual(reverse.entries.map((entry) => entry.trace_id), ['t3', 't2']);
+
+  const reverseOffset = await auditService.readEntries({ limit: 1, offset: 1, reverse: true });
+  assert.deepEqual(reverseOffset.entries.map((entry) => entry.trace_id), ['t2']);
+
+  const filteredTool = await auditService.readEntries({ limit: 10, offset: 0, filters: { tool: 'mcp_api_client' } });
+  assert.equal(filteredTool.total, 2);
+
+  const filteredStatus = await auditService.readEntries({ limit: 10, offset: 0, filters: { status: 'error' } });
+  assert.deepEqual(filteredStatus.entries.map((entry) => entry.trace_id), ['t2']);
+
+  const filteredSince = await auditService.readEntries({ limit: 10, offset: 0, filters: { since: '2025-01-02T12:00:00.000Z' } });
+  assert.deepEqual(filteredSince.entries.map((entry) => entry.trace_id), ['t3']);
+
+  process.env.MCP_AUDIT_PATH = original;
+  await fs.rm(dir, { recursive: true, force: true });
+});

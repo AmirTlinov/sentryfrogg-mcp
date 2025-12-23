@@ -2,8 +2,14 @@
 
 [English](README.md) • [Docs](docs/README.md) • [Конфигурация MCP](mcp_config.md) • [Интеграционный стенд](integration/README.md) • [История изменений](CHANGELOG.md)
 
-SentryFrogg — MCP-сервер (stdio), который даёт LLM-агентам продакшн-инструментарий для PostgreSQL, SSH и HTTP.
-Подходит, когда нужен доступ к реальной инфраструктуре без glue-скриптов: профили, стриминг и аудит уже есть.
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Node.js >=18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+[![CI](https://github.com/AmirTlinov/sentryfrogg-mcp/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/AmirTlinov/sentryfrogg-mcp/actions/workflows/ci.yml)
+
+SentryFrogg — MCP-сервер (stdio), который даёт LLM-агентам продакшн-инструментарий для PostgreSQL, SSH (включая SFTP) и HTTP.
+Подходит, когда нужен доступ к реальной инфраструктуре без glue-скриптов: профили, потоковые пайплайны, runbooks и аудит уже есть.
+
+Если вы хотите, чтобы агент гонял реальные данные (API ↔ SFTP ↔ Postgres), делал управляемые SSH-операции и оставлял понятный след — это оно.
 
 ## Почему SentryFrogg
 - Единая система профилей для Postgres, SSH и HTTP.
@@ -12,6 +18,7 @@ SentryFrogg — MCP-сервер (stdio), который даёт LLM-агент
 - Runbooks + state для многошаговых сценариев и воспроизводимых операций.
 - Наблюдаемость: trace/span метаданные и аудит-лог с редактированием.
 - Профили шифруются (AES-256-GCM) и хранятся локально.
+- Безопасные дефолты для записи файлов (без перезаписи, если не указать `overwrite: true`).
 
 ## Сценарии
 - Синхронизация или бэкфилл данных между API, SFTP и PostgreSQL.

@@ -12,6 +12,7 @@ const { createWriteStream } = require('fs');
 const { PassThrough } = require('stream');
 const { Pool } = require('pg');
 const Constants = require('../constants/Constants.cjs');
+const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic.cjs');
 const {
   normalizeTableContext,
   quoteQualifiedIdentifier,
@@ -1001,9 +1002,23 @@ class PostgreSQLManager {
       throw new Error('file_path is required');
     }
 
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    const stream = createWriteStream(filePath, { encoding: 'utf8' });
-    const result = await this.exportToStream(args, stream);
+    const overwrite = args.overwrite === true;
+    if (!overwrite && await pathExists(filePath)) {
+      throw new Error(`Local path already exists: ${filePath}`);
+    }
+
+    await ensureDirForFile(filePath);
+    const tmpPath = tempSiblingPath(filePath, '.part');
+    const stream = createWriteStream(tmpPath, { encoding: 'utf8', mode: 0o600 });
+
+    let result;
+    try {
+      result = await this.exportToStream(args, stream);
+      await atomicReplaceFile(tmpPath, filePath, { overwrite, mode: 0o600 });
+    } catch (error) {
+      await fs.unlink(tmpPath).catch(() => null);
+      throw error;
+    }
 
     return {
       ...result,

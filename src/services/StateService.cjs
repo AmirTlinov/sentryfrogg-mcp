@@ -5,8 +5,8 @@
  */
 
 const fs = require('fs/promises');
-const path = require('path');
 const { resolveStatePath } = require('../utils/paths.cjs');
+const { atomicWriteTextFile } = require('../utils/fsAtomic.cjs');
 
 class StateService {
   constructor(logger) {
@@ -44,8 +44,7 @@ class StateService {
   }
 
   async persist() {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, `${JSON.stringify(this.persistent, null, 2)}\n`, 'utf8');
+    await atomicWriteTextFile(this.filePath, `${JSON.stringify(this.persistent, null, 2)}\n`, { mode: 0o600 });
     this.stats.saved += 1;
   }
 

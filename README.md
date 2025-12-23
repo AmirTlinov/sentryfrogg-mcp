@@ -6,8 +6,10 @@
 ![Node.js >=18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 [![CI](https://github.com/AmirTlinov/sentryfrogg-mcp/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/AmirTlinov/sentryfrogg-mcp/actions/workflows/ci.yml)
 
-SentryFrogg is a stdio-based Model Context Protocol (MCP) server that gives LLM agents a production-grade toolbox for PostgreSQL, SSH, and HTTP.
-Use it when you want real infrastructure access without glue scripts: profiles, streaming pipelines, and auditability are built in.
+SentryFrogg is a stdio-based Model Context Protocol (MCP) server that gives LLM agents a production-grade toolbox for PostgreSQL, SSH (incl. SFTP), and HTTP.
+Use it when you want real infrastructure access without glue scripts: profiles, streaming pipelines, runbooks, and auditability are built in.
+
+If you want your agent to move real data (API ↔ SFTP ↔ Postgres), run controlled SSH ops, and leave a traceable trail — this is the server.
 
 ## Why SentryFrogg
 - One profile system across Postgres, SSH, and HTTP.
@@ -16,6 +18,7 @@ Use it when you want real infrastructure access without glue scripts: profiles, 
 - Runbooks + state for multi-step workflows and repeatable ops.
 - Observability with trace/span metadata and audit logs (redacted).
 - Encrypted local profile store (AES-256-GCM).
+- Safe-by-default local writes (no overwrite unless `overwrite: true`).
 
 ## Use cases
 - Sync or backfill data between APIs, SFTP drops, and PostgreSQL.

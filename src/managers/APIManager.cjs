@@ -13,6 +13,7 @@ const { pipeline } = require('stream/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { getPathValue } = require('../utils/dataPath.cjs');
+const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic.cjs');
 
 const execFileAsync = promisify(execFile);
 
@@ -499,7 +500,7 @@ class APIManager {
 
   buildHeaders(baseHeaders, authHeaders) {
     return {
-      'User-Agent': 'sentryfrogg-api-client/6.2.1',
+      'User-Agent': 'sentryfrogg-api-client/6.3.0',
       Accept: 'application/json, text/plain, */*',
       ...baseHeaders,
       ...authHeaders,
@@ -1111,14 +1112,18 @@ class APIManager {
       throw new Error('download_path is required');
     }
 
+    const overwrite = args.overwrite === true;
+    if (!overwrite && await pathExists(filePath)) {
+      throw new Error(`Local path already exists: ${filePath}`);
+    }
+
     const controller = new AbortController();
     const timeout = config.timeoutMs ? setTimeout(() => controller.abort(), config.timeoutMs) : null;
     const started = Date.now();
-    const dir = path.dirname(filePath);
-    const tmpPath = `${filePath}.part-${Date.now()}`;
+    const tmpPath = tempSiblingPath(filePath, '.part');
 
     try {
-      await fs.mkdir(dir, { recursive: true });
+      await ensureDirForFile(filePath);
       const response = await this.fetch(config.url, {
         method: config.method,
         headers: config.headers,
@@ -1129,13 +1134,13 @@ class APIManager {
 
       if (response.body) {
         const readable = Readable.fromWeb(response.body);
-        await pipeline(readable, createWriteStream(tmpPath));
+        await pipeline(readable, createWriteStream(tmpPath, { mode: 0o600 }));
       } else {
         const buffer = Buffer.from(await response.arrayBuffer());
-        await fs.writeFile(tmpPath, buffer);
+        await fs.writeFile(tmpPath, buffer, { mode: 0o600 });
       }
 
-      await fs.rename(tmpPath, filePath);
+      await atomicReplaceFile(tmpPath, filePath, { overwrite, mode: 0o600 });
       const stat = await fs.stat(filePath);
 
       this.stats.downloads += 1;

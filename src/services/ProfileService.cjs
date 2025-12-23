@@ -7,6 +7,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { resolveProfileBaseDir } = require('../utils/paths.cjs');
+const { atomicWriteTextFile } = require('../utils/fsAtomic.cjs');
 
 class ProfileService {
   constructor(logger, security) {
@@ -75,8 +76,7 @@ class ProfileService {
 
   async persist() {
     const data = Object.fromEntries(this.profiles);
-    await fs.mkdir(this.baseDir, { recursive: true });
-    await fs.writeFile(this.filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+    await atomicWriteTextFile(this.filePath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
     this.stats.saved += 1;
   }
 
