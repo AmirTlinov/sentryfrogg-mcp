@@ -47,12 +47,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AmirTlinov/SentryFrogg-MCP.git"
+    "url": "git+https://github.com/AmirTlinov/sentryfrogg-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/AmirTlinov/SentryFrogg-MCP/issues"
+    "url": "https://github.com/AmirTlinov/sentryfrogg-mcp/issues"
   },
-  "homepage": "https://github.com/AmirTlinov/SentryFrogg-MCP#readme",
+  "homepage": "https://github.com/AmirTlinov/sentryfrogg-mcp#readme",
   "files": [
     "sentryfrogg_server.cjs",
     "src/",
