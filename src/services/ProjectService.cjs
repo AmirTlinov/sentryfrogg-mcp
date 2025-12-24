@@ -72,6 +72,7 @@ class ProjectService {
     allowString(target.env_profile, 'target.env_profile');
     allowString(target.postgres_profile, 'target.postgres_profile');
     allowString(target.api_profile, 'target.api_profile');
+    allowString(target.vault_profile, 'target.vault_profile');
     allowString(target.cwd, 'target.cwd');
     allowString(target.env_path, 'target.env_path');
     allowString(target.description, 'target.description');

@@ -69,6 +69,7 @@ test('ProjectService stores targets with ssh/env profile bindings', async (t) =>
         env_profile: 'myapp-prod-env',
         postgres_profile: 'myapp-prod-db',
         api_profile: 'myapp-prod-api',
+        vault_profile: 'myapp-vault',
         cwd: '/opt/myapp',
         env_path: '/opt/myapp/.env',
       },
@@ -80,6 +81,7 @@ test('ProjectService stores targets with ssh/env profile bindings', async (t) =>
   assert.equal(stored.project.default_target, 'prod');
   assert.equal(stored.project.targets.prod.ssh_profile, 'myapp-prod');
   assert.equal(stored.project.targets.prod.postgres_profile, 'myapp-prod-db');
+  assert.equal(stored.project.targets.prod.vault_profile, 'myapp-vault');
 });
 
 test('SSHManager resolves ssh profile via project target (and active project)', async () => {

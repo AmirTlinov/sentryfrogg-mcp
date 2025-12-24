@@ -133,6 +133,9 @@ const toolCatalog = [
         target: { type: 'string' },
         ssh_profile_name: { type: 'string' },
         ssh_profile: { type: 'string' },
+        env_profile: { type: 'string' },
+        vault_profile_name: { type: 'string' },
+        vault_profile: { type: 'string' },
 
         remote_path: { type: 'string' },
         mode: { type: 'integer' },
@@ -146,6 +149,32 @@ const toolCatalog = [
         timeout_ms: { type: 'integer' },
         pty: { type: ['boolean', 'object'] },
 
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: 'mcp_vault',
+    description: 'HashiCorp Vault: profiles + basic diagnostics (KV v2 ready).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test'] },
+        profile_name: { type: 'string' },
+        include_secrets: { type: 'boolean' },
+        addr: { type: 'string' },
+        namespace: { type: 'string' },
+        token: { type: 'string' },
+        timeout_ms: { type: 'integer' },
         output: outputSchema,
         store_as: { type: ['string', 'object'] },
         store_scope: { type: 'string', enum: ['session', 'persistent'] },
@@ -501,6 +530,7 @@ toolCatalog.push(
   { name: 'state', description: 'Alias for mcp_state.', inputSchema: toolByName.mcp_state.inputSchema },
   { name: 'project', description: 'Alias for mcp_project.', inputSchema: toolByName.mcp_project.inputSchema },
   { name: 'env', description: 'Alias for mcp_env.', inputSchema: toolByName.mcp_env.inputSchema },
+  { name: 'vault', description: 'Alias for mcp_vault.', inputSchema: toolByName.mcp_vault.inputSchema },
   { name: 'runbook', description: 'Alias for mcp_runbook.', inputSchema: toolByName.mcp_runbook.inputSchema },
   { name: 'alias', description: 'Alias for mcp_alias.', inputSchema: toolByName.mcp_alias.inputSchema },
   { name: 'preset', description: 'Alias for mcp_preset.', inputSchema: toolByName.mcp_preset.inputSchema },
@@ -626,6 +656,7 @@ class SentryFroggServer {
       state: 'mcp_state',
       project: 'mcp_project',
       env: 'mcp_env',
+      vault: 'mcp_vault',
       runbook: 'mcp_runbook',
       alias: 'mcp_alias',
       preset: 'mcp_preset',
@@ -720,11 +751,32 @@ class SentryFroggServer {
       if (toolName === 'mcp_env') {
         switch (actionName) {
           case 'profile_upsert':
-            return { action: 'profile_upsert', profile_name: 'myapp-prod-env', secrets: { DATABASE_URL: 'postgres://...' } };
+            return {
+              action: 'profile_upsert',
+              profile_name: 'myapp-prod-env',
+              secrets: { DATABASE_URL: 'ref:vault:kv2:secret/myapp/prod#DATABASE_URL' },
+            };
           case 'write_remote':
             return { action: 'write_remote', target: 'prod', overwrite: false, backup: true };
           case 'run_remote':
             return { action: 'run_remote', target: 'prod', command: 'printenv | head' };
+          default:
+            return { action: actionName };
+        }
+      }
+
+      if (toolName === 'mcp_vault') {
+        switch (actionName) {
+          case 'profile_upsert':
+            return {
+              action: 'profile_upsert',
+              profile_name: 'corp-vault',
+              addr: 'https://vault.example.com',
+              namespace: 'team-a',
+              token: '<token>',
+            };
+          case 'profile_test':
+            return { action: 'profile_test', profile_name: 'corp-vault' };
           default:
             return { action: actionName };
         }
@@ -779,6 +831,10 @@ class SentryFroggServer {
       mcp_env: {
         description: 'Env: зашифрованные env-бандлы и безопасная запись/запуск на серверах по SSH.',
         usage: 'profile_upsert/profile_list → write_remote/run_remote',
+      },
+      mcp_vault: {
+        description: 'Vault: профили (addr/token/namespace) и базовая диагностика.',
+        usage: 'profile_upsert/profile_list → profile_test',
       },
       mcp_runbook: {
         description: 'Runbooks: хранение и выполнение многошаговых сценариев, плюс DSL.',

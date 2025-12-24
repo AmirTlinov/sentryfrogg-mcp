@@ -143,6 +143,7 @@ class ServiceBootstrap {
     const Security = require('../services/Security.cjs');
     const Validation = require('../services/Validation.cjs');
     const ProfileService = require('../services/ProfileService.cjs');
+    const VaultClient = require('../services/VaultClient.cjs');
     const StateService = require('../services/StateService.cjs');
     const ProjectService = require('../services/ProjectService.cjs');
     const ProjectResolver = require('../services/ProjectResolver.cjs');
@@ -175,6 +176,13 @@ class ServiceBootstrap {
       new ProfileService(logger, security), { 
       singleton: true,
       dependencies: ['logger', 'security'] 
+    });
+
+    // Vault client (KV v2)
+    this.container.register('vaultClient', (logger, validation, profileService) =>
+      new VaultClient(logger, validation, profileService), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'profileService'],
     });
 
     // State сервис
@@ -242,6 +250,7 @@ class ServiceBootstrap {
     const StateManager = require('../managers/StateManager.cjs');
     const ProjectManager = require('../managers/ProjectManager.cjs');
     const EnvManager = require('../managers/EnvManager.cjs');
+    const VaultManager = require('../managers/VaultManager.cjs');
     const RunbookManager = require('../managers/RunbookManager.cjs');
     const AliasManager = require('../managers/AliasManager.cjs');
     const PresetManager = require('../managers/PresetManager.cjs');
@@ -301,15 +310,23 @@ class ServiceBootstrap {
 
     // Env Manager
     this.container.register('envManager',
-      (logger, validation, profileService, sshManager, projectResolver) =>
-        new EnvManager(logger, validation, profileService, sshManager, projectResolver), {
+      (logger, validation, profileService, sshManager, projectResolver, vaultClient) =>
+        new EnvManager(logger, validation, profileService, sshManager, projectResolver, vaultClient), {
       singleton: true,
-      dependencies: ['logger', 'validation', 'profileService', 'sshManager', 'projectResolver'],
+      dependencies: ['logger', 'validation', 'profileService', 'sshManager', 'projectResolver', 'vaultClient'],
+    });
+
+    // Vault Manager
+    this.container.register('vaultManager',
+      (logger, validation, profileService, vaultClient) =>
+        new VaultManager(logger, validation, profileService, vaultClient), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'profileService', 'vaultClient'],
     });
 
     // Tool executor
     this.container.register('toolExecutor',
-      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, apiManager, stateManager, projectManager, envManager, aliasManager, presetManager, auditManager, pipelineManager) =>
+      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, apiManager, stateManager, projectManager, envManager, vaultManager, aliasManager, presetManager, auditManager, pipelineManager) =>
         new ToolExecutor(logger, stateService, aliasService, presetService, auditService, {
           mcp_psql_manager: (args) => postgresqlManager.handleAction(args),
           mcp_ssh_manager: (args) => sshManager.handleAction(args),
@@ -317,6 +334,7 @@ class ServiceBootstrap {
           mcp_state: (args) => stateManager.handleAction(args),
           mcp_project: (args) => projectManager.handleAction(args),
           mcp_env: (args) => envManager.handleAction(args),
+          mcp_vault: (args) => vaultManager.handleAction(args),
           mcp_alias: (args) => aliasManager.handleAction(args),
           mcp_preset: (args) => presetManager.handleAction(args),
           mcp_audit: (args) => auditManager.handleAction(args),
@@ -331,6 +349,7 @@ class ServiceBootstrap {
             state: 'mcp_state',
             project: 'mcp_project',
             env: 'mcp_env',
+            vault: 'mcp_vault',
             runbook: 'mcp_runbook',
             alias: 'mcp_alias',
             preset: 'mcp_preset',
@@ -351,6 +370,7 @@ class ServiceBootstrap {
         'stateManager',
         'projectManager',
         'envManager',
+        'vaultManager',
         'aliasManager',
         'presetManager',
         'auditManager',

@@ -138,6 +138,7 @@ Project example:
         "env_profile": "myapp-prod-env",
         "postgres_profile": "myapp-prod-db",
         "api_profile": "myapp-prod-api",
+        "vault_profile": "myapp-vault",
         "cwd": "/opt/myapp",
         "env_path": "/opt/myapp/.env"
       }
@@ -206,6 +207,48 @@ Notes:
 - If `remote_path` is omitted, it can default from `project target.env_path` or `project target.cwd + '/.env'`.
 - `run_remote` can default `cwd` from `project target.cwd`.
 - `profile_name` refers to the env profile; `ssh_profile_name` refers to the SSH profile (they can be inferred from project bindings).
+- `profile_get` only reveals secret values when `include_secrets: true` **and** `SENTRYFROGG_ALLOW_SECRET_EXPORT=1` (or `SF_ALLOW_SECRET_EXPORT=1`) is set.
+
+## `mcp_vault`
+
+Vault profile store + basic diagnostics. Useful as a safe backend for resolving env secrets at execution time.
+
+Key actions:
+- `profile_upsert` / `profile_get` / `profile_list` / `profile_delete` / `profile_test`
+
+Profile example:
+
+```json
+{
+  "action": "profile_upsert",
+  "profile_name": "corp-vault",
+  "addr": "https://vault.example.com",
+  "namespace": "team-a",
+  "token": "<token>"
+}
+```
+
+Test connectivity (and token validity when token is present):
+
+```json
+{ "action": "profile_test", "profile_name": "corp-vault" }
+```
+
+Using Vault KV v2 in env profiles (resolved on `write_remote` / `run_remote`):
+
+```json
+{
+  "action": "profile_upsert",
+  "profile_name": "myapp-prod-env",
+  "secrets": {
+    "DATABASE_URL": "ref:vault:kv2:secret/myapp/prod#DATABASE_URL"
+  }
+}
+```
+
+Notes:
+- `ref:vault:kv2:<mount>/<path>#<key>` reads from Vault KV v2 (`/v1/<mount>/data/<path>`).
+- Vault profile is selected via `vault_profile_name` / `vault_profile`, or `project target.vault_profile`, or auto-pick when only one vault profile exists.
 - `profile_get` only reveals secret values when `include_secrets: true` **and** `SENTRYFROGG_ALLOW_SECRET_EXPORT=1` (or `SF_ALLOW_SECRET_EXPORT=1`) is set.
 
 ## `mcp_runbook`
