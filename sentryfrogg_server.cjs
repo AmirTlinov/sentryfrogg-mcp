@@ -164,7 +164,7 @@ const toolCatalog = [
   },
   {
     name: 'mcp_vault',
-    description: 'HashiCorp Vault: profiles + basic diagnostics (KV v2 ready).',
+    description: 'HashiCorp Vault: профили + диагностика (KV v2 + AppRole auto-login).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -172,8 +172,11 @@ const toolCatalog = [
         profile_name: { type: 'string' },
         include_secrets: { type: 'boolean' },
         addr: { type: 'string' },
-        namespace: { type: 'string' },
-        token: { type: 'string' },
+        namespace: { type: ['string', 'null'] },
+        auth_type: { type: ['string', 'null'] },
+        token: { type: ['string', 'null'] },
+        role_id: { type: ['string', 'null'] },
+        secret_id: { type: ['string', 'null'] },
         timeout_ms: { type: 'integer' },
         output: outputSchema,
         store_as: { type: ['string', 'object'] },
@@ -783,7 +786,9 @@ class SentryFroggServer {
               profile_name: 'corp-vault',
               addr: 'https://vault.example.com',
               namespace: 'team-a',
-              token: '<token>',
+              auth_type: 'approle',
+              role_id: '<role_id>',
+              secret_id: '<secret_id>',
             };
           case 'profile_test':
             return { action: 'profile_test', profile_name: 'corp-vault' };
@@ -843,7 +848,7 @@ class SentryFroggServer {
         usage: 'profile_upsert/profile_list → write_remote/run_remote',
       },
       mcp_vault: {
-        description: 'Vault: профили (addr/token/namespace) и базовая диагностика.',
+        description: 'Vault: профили (addr/namespace + token или AppRole) и диагностика (KV v2).',
         usage: 'profile_upsert/profile_list → profile_test',
       },
       mcp_runbook: {

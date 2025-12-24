@@ -212,12 +212,12 @@ Notes:
 
 ## `mcp_vault`
 
-Vault profile store + basic diagnostics. Useful as a safe backend for resolving env secrets at execution time.
+Vault profile store + diagnostics. Useful as a safe backend for resolving secrets at execution time.
 
 Key actions:
 - `profile_upsert` / `profile_get` / `profile_list` / `profile_delete` / `profile_test`
 
-Profile example:
+Profile example (AppRole; token is acquired on demand and persisted encrypted):
 
 ```json
 {
@@ -225,11 +225,26 @@ Profile example:
   "profile_name": "corp-vault",
   "addr": "https://vault.example.com",
   "namespace": "team-a",
+  "auth_type": "approle",
+  "role_id": "<role_id>",
+  "secret_id": "<secret_id>"
+}
+```
+
+Profile example (static token):
+
+```json
+{
+  "action": "profile_upsert",
+  "profile_name": "corp-vault",
+  "addr": "https://vault.example.com",
+  "namespace": "team-a",
+  "auth_type": "token",
   "token": "<token>"
 }
 ```
 
-Test connectivity (and token validity when token is present):
+Test connectivity (and auth validity):
 
 ```json
 { "action": "profile_test", "profile_name": "corp-vault" }
@@ -250,6 +265,7 @@ Using Vault KV v2 in env profiles (resolved on `write_remote` / `run_remote`):
 Notes:
 - `ref:vault:kv2:<mount>/<path>#<key>` reads from Vault KV v2 (`/v1/<mount>/data/<path>`).
 - Vault profile is selected via `vault_profile_name` / `vault_profile`, or `project target.vault_profile`, or auto-pick when only one vault profile exists.
+- For AppRole profiles, `client_token` is fetched on-demand and saved into the profile (encrypted). To clear it, call `profile_upsert` with `"token": null`.
 - SecretRefs work across `mcp_env`, `mcp_ssh_manager`, `mcp_psql_manager`, and `mcp_api_client` (wherever secret fields are used).
 - `profile_get` only reveals secret values when `include_secrets: true` **and** `SENTRYFROGG_ALLOW_SECRET_EXPORT=1` (or `SF_ALLOW_SECRET_EXPORT=1`) is set.
 

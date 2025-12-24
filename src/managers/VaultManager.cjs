@@ -38,11 +38,39 @@ class VaultManager {
   async profileUpsert(profileName, params = {}) {
     const name = this.validation.ensureString(profileName, 'profile_name');
     const addr = this.validation.ensureString(params.addr, 'addr', { trim: true });
-    const namespace = params.namespace !== undefined && params.namespace !== null && String(params.namespace).trim()
-      ? String(params.namespace).trim()
+    const namespace = params.namespace === undefined
+      ? undefined
+      : (params.namespace === null || !String(params.namespace).trim() ? null : String(params.namespace).trim());
+
+    const authType = params.auth_type !== undefined && params.auth_type !== null && String(params.auth_type).trim()
+      ? String(params.auth_type).trim().toLowerCase()
       : undefined;
 
-    const token = params.token !== undefined ? String(params.token) : undefined;
+    const token = params.token === undefined ? undefined : (params.token === null ? null : String(params.token));
+    const roleId = params.role_id === undefined ? undefined : (params.role_id === null ? null : String(params.role_id));
+    const secretId = params.secret_id === undefined ? undefined : (params.secret_id === null ? null : String(params.secret_id));
+
+    const tokenValue = typeof token === 'string' && token.trim() ? token : null;
+    const roleIdValue = typeof roleId === 'string' && roleId.trim() ? roleId : null;
+    const secretIdValue = typeof secretId === 'string' && secretId.trim() ? secretId : null;
+
+    const inferredAuth = authType || (tokenValue ? 'token' : (roleIdValue || secretIdValue ? 'approle' : 'none'));
+    if (!['token', 'approle', 'none'].includes(inferredAuth)) {
+      throw new Error(`Unknown vault auth_type: ${String(inferredAuth)}`);
+    }
+
+    if (inferredAuth === 'token' && !tokenValue) {
+      throw new Error('token is required for vault auth_type=token');
+    }
+
+    if (inferredAuth === 'approle') {
+      if (!roleIdValue) {
+        throw new Error('role_id is required for vault auth_type=approle');
+      }
+      if (!secretIdValue) {
+        throw new Error('secret_id is required for vault auth_type=approle');
+      }
+    }
 
     let previous = null;
     try {
@@ -55,13 +83,17 @@ class VaultManager {
 
     await this.profileService.setProfile(name, {
       type: VAULT_PROFILE_TYPE,
-      data: { addr, namespace },
-      secrets: token ? { token } : {},
+      data: { addr, namespace, auth_type: inferredAuth === 'none' ? null : inferredAuth },
+      secrets: {
+        token,
+        role_id: roleId,
+        secret_id: secretId,
+      },
     });
 
     try {
       await this.vaultClient.sysHealth(name, { timeout_ms: params.timeout_ms });
-      if (token) {
+      if (tokenValue) {
         await this.vaultClient.tokenLookupSelf(name, { timeout_ms: params.timeout_ms });
       }
     } catch (error) {
@@ -83,8 +115,8 @@ class VaultManager {
       profile: {
         name,
         type: VAULT_PROFILE_TYPE,
-        data: { addr, namespace },
-        auth: token ? 'token' : 'none',
+        data: { addr, namespace, auth_type: inferredAuth === 'none' ? undefined : inferredAuth },
+        auth: inferredAuth === 'approle' ? 'approle' : (tokenValue ? 'token' : 'none'),
       },
     };
   }

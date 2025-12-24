@@ -110,3 +110,124 @@ test('VaultClient kv2Get reads key from KV v2 response', async () => {
   assert.ok(String(calls[0].url).includes('/v1/secret/data/myapp/prod'));
 });
 
+test('VaultClient kv2Get auto-logins via AppRole and persists token', async () => {
+  const profile = {
+    name: 'vault',
+    type: 'vault',
+    data: { addr: 'https://vault.example' },
+    secrets: { role_id: 'role-1', secret_id: 'secret-1' },
+  };
+
+  let persisted = null;
+  const profileService = {
+    async getProfile(name, expectedType) {
+      assert.equal(name, 'vault');
+      assert.equal(expectedType, 'vault');
+      return profile;
+    },
+    async setProfile(name, config) {
+      assert.equal(name, 'vault');
+      assert.equal(config.type, 'vault');
+      persisted = config.secrets.token;
+      profile.secrets.token = persisted;
+    },
+  };
+
+  const { fetch, calls } = makeFetchStub([
+    {
+      match: '/v1/auth/approle/login',
+      status: 200,
+      body: { auth: { client_token: 'token123' } },
+    },
+    {
+      match: '/v1/secret/data/myapp/prod',
+      status: 200,
+      body: { data: { data: { DATABASE_URL: 'postgres://db' } } },
+    },
+  ]);
+
+  const client = new VaultClient(loggerStub, validationStub, profileService, { fetch });
+  const value = await client.kv2Get('vault', 'secret/myapp/prod#DATABASE_URL');
+  assert.equal(value, 'postgres://db');
+
+  assert.equal(persisted, 'token123');
+  assert.equal(calls.length, 2);
+  assert.ok(String(calls[0].url).includes('/v1/auth/approle/login'));
+  assert.equal(calls[0].options.method, 'POST');
+  assert.ok(String(calls[1].url).includes('/v1/secret/data/myapp/prod'));
+  assert.equal(calls[1].options.headers['X-Vault-Token'], 'token123');
+});
+
+test('VaultClient kv2Get retries with AppRole token when existing token is rejected', async () => {
+  const profile = {
+    name: 'vault',
+    type: 'vault',
+    data: { addr: 'https://vault.example' },
+    secrets: { token: 'badtoken', role_id: 'role-1', secret_id: 'secret-1' },
+  };
+
+  const calls = [];
+  let persisted = null;
+  const profileService = {
+    async getProfile() {
+      return profile;
+    },
+    async setProfile(_name, config) {
+      persisted = config.secrets.token;
+      profile.secrets.token = persisted;
+    },
+  };
+
+  const fetchStub = async (url, options) => {
+    calls.push({ url: String(url), options });
+
+    if (String(url).includes('/v1/secret/data/myapp/prod')) {
+      const token = options.headers['X-Vault-Token'];
+      if (token === 'badtoken') {
+        return {
+          ok: false,
+          status: 403,
+          async text() {
+            return JSON.stringify({ errors: ['permission denied'] });
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({ data: { data: { DATABASE_URL: 'postgres://db' } } });
+        },
+      };
+    }
+
+    if (String(url).includes('/v1/auth/approle/login')) {
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({ auth: { client_token: 'goodtoken' } });
+        },
+      };
+    }
+
+    return {
+      ok: false,
+      status: 404,
+      async text() {
+        return JSON.stringify({ errors: ['not found'] });
+      },
+    };
+  };
+
+  const client = new VaultClient(loggerStub, validationStub, profileService, { fetch: fetchStub });
+  const value = await client.kv2Get('vault', 'secret/myapp/prod#DATABASE_URL');
+  assert.equal(value, 'postgres://db');
+
+  assert.equal(persisted, 'goodtoken');
+  assert.equal(calls.length, 3);
+  assert.ok(calls[0].url.includes('/v1/secret/data/myapp/prod'));
+  assert.ok(calls[1].url.includes('/v1/auth/approle/login'));
+  assert.ok(calls[2].url.includes('/v1/secret/data/myapp/prod'));
+  assert.equal(calls[2].options.headers['X-Vault-Token'], 'goodtoken');
+});

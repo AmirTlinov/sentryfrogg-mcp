@@ -66,6 +66,7 @@ class VaultClient {
     this.fetch = options.fetch || defaultFetch;
     this.defaultTimeoutMs = Number.isInteger(options.timeout_ms) ? options.timeout_ms : 15000;
     this.defaultRetries = Number.isInteger(options.retries) ? options.retries : 1;
+    this.loginInFlight = new Map();
   }
 
   async loadProfile(profileName) {
@@ -77,8 +78,11 @@ class VaultClient {
     const addr = normalizeBaseUrl(data.addr);
     const namespace = data.namespace ? String(data.namespace).trim() : undefined;
     const token = secrets.token ? String(secrets.token) : undefined;
+    const auth_type = data.auth_type ? String(data.auth_type).trim().toLowerCase() : undefined;
+    const role_id = secrets.role_id ? String(secrets.role_id) : undefined;
+    const secret_id = secrets.secret_id ? String(secrets.secret_id) : undefined;
 
-    return { profile_name: name, addr, namespace, token };
+    return { profile_name: name, addr, namespace, token, auth_type, role_id, secret_id };
   }
 
   async requestJson(url, { method = 'GET', headers, body, timeout_ms, retries } = {}) {
@@ -142,16 +146,93 @@ class VaultClient {
 
   async tokenLookupSelf(profileName, options = {}) {
     const profile = await this.loadProfile(profileName);
-    if (!profile.token) {
-      throw new Error('Vault token is required for token lookup');
-    }
+    const token = await this.ensureToken(profile, { timeout_ms: options.timeout_ms, retries: options.retries });
     const url = `${profile.addr}/v1/auth/token/lookup-self`;
-    return this.requestJson(url, {
-      method: 'GET',
-      headers: buildHeaders({ token: profile.token, namespace: profile.namespace }),
-      timeout_ms: options.timeout_ms,
-      retries: options.retries,
+    try {
+      return await this.requestJson(url, {
+        method: 'GET',
+        headers: buildHeaders({ token, namespace: profile.namespace }),
+        timeout_ms: options.timeout_ms,
+        retries: options.retries,
+      });
+    } catch (error) {
+      if (error?.status === 403 && this.canApprole(profile)) {
+        const fresh = await this.loginApprole(profile, { timeout_ms: options.timeout_ms, retries: options.retries });
+        return this.requestJson(url, {
+          method: 'GET',
+          headers: buildHeaders({ token: fresh, namespace: profile.namespace }),
+          timeout_ms: options.timeout_ms,
+          retries: options.retries,
+        });
+      }
+      throw error;
+    }
+  }
+
+  canApprole(profile) {
+    if (!profile || typeof profile !== 'object') {
+      return false;
+    }
+    const roleId = profile.role_id;
+    const secretId = profile.secret_id;
+    return typeof roleId === 'string' && roleId.trim().length > 0
+      && typeof secretId === 'string' && secretId.trim().length > 0;
+  }
+
+  async ensureToken(profile, options = {}) {
+    if (profile.token && String(profile.token).trim()) {
+      return String(profile.token);
+    }
+    if (!this.canApprole(profile)) {
+      throw new Error('Vault token is required for this operation');
+    }
+    return this.loginApprole(profile, options);
+  }
+
+  async loginApprole(profile, options = {}) {
+    const profileName = profile.profile_name;
+    if (!profileName) {
+      throw new Error('Vault profile_name is required for AppRole login');
+    }
+    const cached = this.loginInFlight.get(profileName);
+    if (cached) {
+      return cached;
+    }
+
+    const run = (async () => {
+      const url = `${profile.addr}/v1/auth/approle/login`;
+      const payload = await this.requestJson(url, {
+        method: 'POST',
+        headers: {
+          ...buildHeaders({ namespace: profile.namespace }),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ role_id: String(profile.role_id), secret_id: String(profile.secret_id) }),
+        timeout_ms: options.timeout_ms,
+        retries: options.retries,
+      });
+
+      const token = payload?.auth?.client_token;
+      if (!token || typeof token !== 'string' || token.trim().length === 0) {
+        throw new Error('Vault AppRole login returned empty client_token');
+      }
+
+      await this.profileService.setProfile(profileName, {
+        type: 'vault',
+        secrets: { token },
+      }).catch((error) => {
+        this.logger.warn('Failed to persist Vault token after AppRole login', { profile: profileName, error: error.message });
+      });
+
+      profile.token = token;
+      return token;
+    })();
+
+    this.loginInFlight.set(profileName, run);
+    run.finally(() => {
+      this.loginInFlight.delete(profileName);
     });
+    return run;
   }
 
   parseKv2Ref(ref) {
@@ -176,9 +257,7 @@ class VaultClient {
 
   async kv2Get(profileName, ref, options = {}) {
     const profile = await this.loadProfile(profileName);
-    if (!profile.token) {
-      throw new Error('Vault token is required for kv2 get');
-    }
+    const token = await this.ensureToken(profile, { timeout_ms: options.timeout_ms, retries: options.retries });
 
     const { mount, secretPath, key } = this.parseKv2Ref(ref);
 
@@ -187,12 +266,24 @@ class VaultClient {
       url.searchParams.set('version', String(options.version));
     }
 
-    const payload = await this.requestJson(url.toString(), {
+    const fetchOnce = (clientToken) => this.requestJson(url.toString(), {
       method: 'GET',
-      headers: buildHeaders({ token: profile.token, namespace: profile.namespace }),
+      headers: buildHeaders({ token: clientToken, namespace: profile.namespace }),
       timeout_ms: options.timeout_ms,
       retries: options.retries,
     });
+
+    let payload;
+    try {
+      payload = await fetchOnce(token);
+    } catch (error) {
+      if (error?.status === 403 && this.canApprole(profile)) {
+        const fresh = await this.loginApprole(profile, { timeout_ms: options.timeout_ms, retries: options.retries });
+        payload = await fetchOnce(fresh);
+      } else {
+        throw error;
+      }
+    }
 
     const data = payload?.data?.data;
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -213,4 +304,3 @@ class VaultClient {
 }
 
 module.exports = VaultClient;
-
