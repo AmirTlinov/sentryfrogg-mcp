@@ -72,6 +72,94 @@ Example:
 }
 ```
 
+## `mcp_project`
+
+Projects are the **highest-level UX primitive** in SentryFrogg: one named project can describe multiple environments (targets)
+and bind each target to SSH/Env/Postgres/API profiles.
+
+Key actions:
+- `project_upsert` / `project_get` / `project_list` / `project_delete`
+- `project_use` / `project_active` / `project_unuse`
+
+Project example:
+
+```json
+{
+  "action": "project_upsert",
+  "name": "myapp",
+  "project": {
+    "description": "MyApp infra bindings",
+    "default_target": "prod",
+    "targets": {
+      "prod": {
+        "description": "Production",
+        "ssh_profile": "myapp-prod-ssh",
+        "env_profile": "myapp-prod-env",
+        "postgres_profile": "myapp-prod-db",
+        "api_profile": "myapp-prod-api",
+        "cwd": "/opt/myapp",
+        "env_path": "/opt/myapp/.env"
+      }
+    }
+  }
+}
+```
+
+Activate project (persists across restarts):
+
+```json
+{ "action": "project_use", "name": "myapp", "scope": "persistent" }
+```
+
+Notes:
+- If a project has multiple targets, `target` is required unless `default_target` is set.
+- Many tools accept `project`/`target` directly, and will also pick up the active project automatically.
+
+## `mcp_env`
+
+Encrypted environment bundles stored as `env` profiles. Useful for safely shipping secrets into remote `.env` files
+and for running remote commands with a controlled env payload.
+
+Key actions:
+- `profile_upsert` / `profile_get` / `profile_list` / `profile_delete`
+- `write_remote` / `run_remote`
+
+Create/update env bundle:
+
+```json
+{
+  "action": "profile_upsert",
+  "profile_name": "myapp-prod-env",
+  "secrets": {
+    "DATABASE_URL": "postgres://...",
+    "API_TOKEN": "..."
+  }
+}
+```
+
+Write remote `.env` (safe by default):
+
+```json
+{
+  "action": "write_remote",
+  "target": "prod",
+  "ssh_profile_name": "myapp-prod-ssh",
+  "profile_name": "myapp-prod-env",
+  "remote_path": "/opt/myapp/.env",
+  "overwrite": true,
+  "backup": true,
+  "mode": 384,
+  "mkdirs": true
+}
+```
+
+Notes:
+- `write_remote` is atomic (temp + rename).
+- `overwrite` defaults to `false` and refuses to replace an existing file unless enabled.
+- If `remote_path` is omitted, it can default from `project target.env_path` or `project target.cwd + '/.env'`.
+- `run_remote` can default `cwd` from `project target.cwd`.
+- `profile_get` only reveals secret values when `include_secrets: true` **and** `SENTRYFROGG_ALLOW_SECRET_EXPORT=1` (or `SF_ALLOW_SECRET_EXPORT=1`) is set.
+
 ## `mcp_runbook`
 
 Runbooks store and execute multi-step workflows with templating, `when`, and `foreach`.
@@ -202,6 +290,12 @@ Profile example:
 }
 ```
 
+Project-aware example (uses `project target.postgres_profile` or active project):
+
+```json
+{ "action": "query", "target": "prod", "sql": "SELECT 1 AS ok" }
+```
+
 Query example:
 
 ```json
@@ -311,6 +405,12 @@ Profile example:
 }
 ```
 
+Project-aware example (uses `project target.ssh_profile` or active project):
+
+```json
+{ "action": "exec", "target": "prod", "command": "uname -a" }
+```
+
 Exec example:
 
 ```json
@@ -363,6 +463,12 @@ Profile example:
   "base_url": "https://api.example.com",
   "auth": { "type": "bearer", "token": "<token>" }
 }
+```
+
+Project-aware example (uses `project target.api_profile` or active project):
+
+```json
+{ "action": "request", "target": "prod", "path": "/v1/health" }
 ```
 
 Request example:
@@ -481,6 +587,10 @@ Available flows:
 - `sftp_to_postgres`
 - `postgres_to_sftp`
 - `postgres_to_http`
+
+Project-aware note:
+- If `project`/`target` (or active project + `target`) is provided, the pipeline will default `http.profile_name`, `postgres.profile_name`, and `sftp.profile_name`
+  from the configured project target bindings when those fields are missing.
 
 Postgres export options (for `postgres_*` flows): `format`, `batch_size`, `limit`, `offset`,
 `columns`/`columns_sql`, `order_by`/`order_by_sql`, `filters`/`where_sql`/`where_params`,

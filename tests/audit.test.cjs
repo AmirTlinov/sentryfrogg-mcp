@@ -61,6 +61,56 @@ test('Audit log redacts sensitive fields', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('Audit log redacts env maps and summaries stdin/content payloads', async () => {
+  const dir = await createTempDir();
+  const auditPath = path.join(dir, 'audit.jsonl');
+  const original = process.env.MCP_AUDIT_PATH;
+  process.env.MCP_AUDIT_PATH = auditPath;
+
+  const auditService = new AuditService(loggerStub);
+  const stateService = {
+    async set() {},
+  };
+
+  const executor = new ToolExecutor(
+    loggerStub,
+    stateService,
+    null,
+    null,
+    auditService,
+    {
+      mcp_ssh_manager: async (args) => ({ ok: true, args }),
+      mcp_local: async (args) => ({ ok: true, args }),
+    }
+  );
+
+  await executor.execute('mcp_ssh_manager', {
+    action: 'exec',
+    command: 'echo ok',
+    env: { DATABASE_URL: 'postgres://user:pass@host/db' },
+  });
+
+  await executor.execute('mcp_local', {
+    action: 'fs_write',
+    path: '/tmp/.env',
+    content: 'SECRET=top-secret',
+    stdin: 'top-secret',
+    content_base64: Buffer.from('top-secret').toString('base64'),
+  });
+
+  const raw = await fs.readFile(auditPath, 'utf8');
+  const entries = raw.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.equal(entries.length, 2);
+
+  assert.equal(entries[0].input.env.DATABASE_URL, '[REDACTED]');
+  assert.ok(String(entries[1].input.content).startsWith('[content:'));
+  assert.ok(String(entries[1].input.stdin).startsWith('[stdin:'));
+  assert.ok(String(entries[1].input.content_base64).startsWith('[base64:'));
+
+  process.env.MCP_AUDIT_PATH = original;
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('AuditService streams entries with reverse/offset/filters', async () => {
   const dir = await createTempDir();
   const auditPath = path.join(dir, 'audit.jsonl');

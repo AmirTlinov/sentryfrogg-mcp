@@ -75,6 +75,17 @@ function redactHeaders(headers, options) {
   return result;
 }
 
+function redactMapValues(map, options) {
+  if (!map || typeof map !== 'object' || Array.isArray(map)) {
+    return map;
+  }
+  const result = {};
+  for (const [key] of Object.entries(map)) {
+    result[key] = options.redaction;
+  }
+  return result;
+}
+
 function redactObject(value, options = {}, seen = new WeakSet()) {
   const config = {
     redaction: options.redaction || DEFAULT_REDACTION,
@@ -110,6 +121,12 @@ function redactObject(value, options = {}, seen = new WeakSet()) {
   for (const [key, raw] of Object.entries(value)) {
     if (key === 'headers') {
       result[key] = redactHeaders(raw, config);
+      continue;
+    }
+
+    const normalizedKey = normalizeKey(key);
+    if (normalizedKey === 'env' || normalizedKey === 'variables') {
+      result[key] = redactMapValues(raw, config);
       continue;
     }
 

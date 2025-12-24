@@ -110,6 +110,23 @@ class ToolExecutor {
     if (cleaned.body_base64) {
       cleaned.body_base64 = `[base64:${String(cleaned.body_base64).length}]`;
     }
+    if (cleaned.content_base64) {
+      cleaned.content_base64 = `[base64:${String(cleaned.content_base64).length}]`;
+    }
+    if (Object.prototype.hasOwnProperty.call(cleaned, 'stdin')) {
+      cleaned.stdin = cleaned.stdin === undefined || cleaned.stdin === null
+        ? cleaned.stdin
+        : `[stdin:${String(cleaned.stdin).length}]`;
+    }
+    if (Object.prototype.hasOwnProperty.call(cleaned, 'content')) {
+      if (typeof cleaned.content === 'string') {
+        cleaned.content = `[content:${cleaned.content.length}]`;
+      } else if (Buffer.isBuffer(cleaned.content)) {
+        cleaned.content = `[buffer:${cleaned.content.length}]`;
+      } else if (cleaned.content !== null && cleaned.content !== undefined) {
+        cleaned.content = `[content:${typeof cleaned.content}]`;
+      }
+    }
     return redactObject(cleaned);
   }
 

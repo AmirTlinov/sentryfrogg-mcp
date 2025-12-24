@@ -19,11 +19,12 @@ function escapeShellValue(value) {
 }
 
 class SSHManager {
-  constructor(logger, security, validation, profileService) {
+  constructor(logger, security, validation, profileService, projectResolver) {
     this.logger = logger.child('ssh');
     this.security = security;
     this.validation = validation;
     this.profileService = profileService;
+    this.projectResolver = projectResolver;
     this.connections = new Map();
     this.stats = {
       commands: 0,
@@ -83,7 +84,7 @@ class SSHManager {
       return { connection: { ...args.connection }, profileName: undefined };
     }
 
-    const profileName = await this.resolveProfileName(args.profile_name);
+    const profileName = await this.resolveProfileName(args.profile_name, args);
     if (!profileName) {
       throw new Error('SSH connection requires profile_name or connection');
     }
@@ -172,9 +173,21 @@ class SSHManager {
     };
   }
 
-  async resolveProfileName(profileName) {
+  async resolveProfileName(profileName, args = {}) {
     if (profileName) {
       return this.validation.ensureString(profileName, 'Profile name');
+    }
+
+    if (this.projectResolver) {
+      const context = await this.projectResolver.resolveContext(args);
+      const sshProfile = context?.target?.ssh_profile;
+      if (!sshProfile) {
+        if (context) {
+          throw new Error(`Project target '${context.targetName}' is missing ssh_profile`);
+        }
+      } else {
+        return this.validation.ensureString(String(sshProfile), 'Profile name');
+      }
     }
 
     const profiles = await this.profileService.listProfiles('ssh');

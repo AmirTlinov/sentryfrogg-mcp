@@ -94,6 +94,7 @@ class APIManager {
     this.validation = validation;
     this.profileService = profileService;
     this.cacheService = cacheService;
+    this.projectResolver = options.projectResolver;
     this.fetch = options.fetch ?? fetchFn;
     this.tokenCache = new Map();
     this.stats = {
@@ -562,7 +563,15 @@ class APIManager {
     return parsed.toString();
   }
 
-  async resolveProfile(profileName) {
+  async resolveProfile(profileName, args = {}) {
+    if (!profileName && this.projectResolver) {
+      const context = await this.projectResolver.resolveContext(args).catch(() => null);
+      const apiProfile = context?.target?.api_profile;
+      if (apiProfile) {
+        profileName = this.validation.ensureString(String(apiProfile), 'profile_name');
+      }
+    }
+
     if (!profileName) {
       const profiles = await this.profileService.listProfiles('api');
       if (profiles.length === 1) {
@@ -961,7 +970,7 @@ class APIManager {
   }
 
   async request(args) {
-    const profile = await this.resolveProfile(args.profile_name);
+    const profile = await this.resolveProfile(args.profile_name, args);
     let auth = args.auth !== undefined ? args.auth : profile.auth;
     const authProvider = args.auth_provider !== undefined ? args.auth_provider : profile.authProvider;
 
@@ -1011,7 +1020,7 @@ class APIManager {
   }
 
   async paginate(args) {
-    const profile = await this.resolveProfile(args.profile_name);
+    const profile = await this.resolveProfile(args.profile_name, args);
     let auth = args.auth !== undefined ? args.auth : profile.auth;
     const authProvider = args.auth_provider !== undefined ? args.auth_provider : profile.authProvider;
 
@@ -1170,7 +1179,7 @@ class APIManager {
   }
 
   async download(args) {
-    const profile = await this.resolveProfile(args.profile_name);
+    const profile = await this.resolveProfile(args.profile_name, args);
     let auth = args.auth !== undefined ? args.auth : profile.auth;
     const authProvider = args.auth_provider !== undefined ? args.auth_provider : profile.authProvider;
 

@@ -87,6 +87,10 @@ class ServiceBootstrap {
         const stateService = this.container.get('stateService');
         await stateService.initialize();
       }
+      if (this.container.has('projectService')) {
+        const projectService = this.container.get('projectService');
+        await projectService.initialize();
+      }
       if (this.container.has('runbookService')) {
         const runbookService = this.container.get('runbookService');
         await runbookService.initialize();
@@ -140,6 +144,8 @@ class ServiceBootstrap {
     const Validation = require('../services/Validation.cjs');
     const ProfileService = require('../services/ProfileService.cjs');
     const StateService = require('../services/StateService.cjs');
+    const ProjectService = require('../services/ProjectService.cjs');
+    const ProjectResolver = require('../services/ProjectResolver.cjs');
     const RunbookService = require('../services/RunbookService.cjs');
     const AliasService = require('../services/AliasService.cjs');
     const PresetService = require('../services/PresetService.cjs');
@@ -176,6 +182,20 @@ class ServiceBootstrap {
       new StateService(logger), {
       singleton: true,
       dependencies: ['logger'],
+    });
+
+    // Project сервис
+    this.container.register('projectService', (logger) =>
+      new ProjectService(logger), {
+      singleton: true,
+      dependencies: ['logger'],
+    });
+
+    // Project resolver (project/target → контекст вызова)
+    this.container.register('projectResolver', (validation, projectService, stateService) =>
+      new ProjectResolver(validation, projectService, stateService), {
+      singleton: true,
+      dependencies: ['validation', 'projectService', 'stateService'],
     });
 
     // Runbook сервис
@@ -220,6 +240,8 @@ class ServiceBootstrap {
     const APIManager = require('../managers/APIManager.cjs');
     const LocalManager = require('../managers/LocalManager.cjs');
     const StateManager = require('../managers/StateManager.cjs');
+    const ProjectManager = require('../managers/ProjectManager.cjs');
+    const EnvManager = require('../managers/EnvManager.cjs');
     const RunbookManager = require('../managers/RunbookManager.cjs');
     const AliasManager = require('../managers/AliasManager.cjs');
     const PresetManager = require('../managers/PresetManager.cjs');
@@ -230,26 +252,26 @@ class ServiceBootstrap {
 
     // PostgreSQL Manager
     this.container.register('postgresqlManager', 
-      (logger, validation, profileService) => 
-        new PostgreSQLManager(logger, validation, profileService), { 
+      (logger, validation, profileService, projectResolver) => 
+        new PostgreSQLManager(logger, validation, profileService, projectResolver), { 
       singleton: true,
-      dependencies: ['logger', 'validation', 'profileService'] 
+      dependencies: ['logger', 'validation', 'profileService', 'projectResolver'] 
     });
 
     // SSH Manager
     this.container.register('sshManager', 
-      (logger, security, validation, profileService) => 
-        new SSHManager(logger, security, validation, profileService), { 
+      (logger, security, validation, profileService, projectResolver) => 
+        new SSHManager(logger, security, validation, profileService, projectResolver), { 
       singleton: true,
-      dependencies: ['logger', 'security', 'validation', 'profileService'] 
+      dependencies: ['logger', 'security', 'validation', 'profileService', 'projectResolver'] 
     });
 
     // API Manager
     this.container.register('apiManager', 
-      (logger, security, validation, profileService, cacheService) => 
-        new APIManager(logger, security, validation, profileService, cacheService), { 
+      (logger, security, validation, profileService, cacheService, projectResolver) => 
+        new APIManager(logger, security, validation, profileService, cacheService, { projectResolver }), { 
       singleton: true,
-      dependencies: ['logger', 'security', 'validation', 'profileService', 'cacheService'] 
+      dependencies: ['logger', 'security', 'validation', 'profileService', 'cacheService', 'projectResolver'] 
     });
 
     if (isUnsafeLocalEnabled()) {
@@ -269,14 +291,32 @@ class ServiceBootstrap {
       dependencies: ['logger', 'stateService'],
     });
 
+    // Project Manager
+    this.container.register('projectManager',
+      (logger, validation, projectService, stateService) =>
+        new ProjectManager(logger, validation, projectService, stateService), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'projectService', 'stateService'],
+    });
+
+    // Env Manager
+    this.container.register('envManager',
+      (logger, validation, profileService, sshManager, projectResolver) =>
+        new EnvManager(logger, validation, profileService, sshManager, projectResolver), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'profileService', 'sshManager', 'projectResolver'],
+    });
+
     // Tool executor
     this.container.register('toolExecutor',
-      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, apiManager, stateManager, aliasManager, presetManager, auditManager, pipelineManager) =>
+      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, apiManager, stateManager, projectManager, envManager, aliasManager, presetManager, auditManager, pipelineManager) =>
         new ToolExecutor(logger, stateService, aliasService, presetService, auditService, {
           mcp_psql_manager: (args) => postgresqlManager.handleAction(args),
           mcp_ssh_manager: (args) => sshManager.handleAction(args),
           mcp_api_client: (args) => apiManager.handleAction(args),
           mcp_state: (args) => stateManager.handleAction(args),
+          mcp_project: (args) => projectManager.handleAction(args),
+          mcp_env: (args) => envManager.handleAction(args),
           mcp_alias: (args) => aliasManager.handleAction(args),
           mcp_preset: (args) => presetManager.handleAction(args),
           mcp_audit: (args) => auditManager.handleAction(args),
@@ -289,6 +329,8 @@ class ServiceBootstrap {
             http: 'mcp_api_client',
             api: 'mcp_api_client',
             state: 'mcp_state',
+            project: 'mcp_project',
+            env: 'mcp_env',
             runbook: 'mcp_runbook',
             alias: 'mcp_alias',
             preset: 'mcp_preset',
@@ -307,6 +349,8 @@ class ServiceBootstrap {
         'sshManager',
         'apiManager',
         'stateManager',
+        'projectManager',
+        'envManager',
         'aliasManager',
         'presetManager',
         'auditManager',
@@ -348,10 +392,10 @@ class ServiceBootstrap {
 
     // Pipeline Manager
     this.container.register('pipelineManager',
-      (logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService) =>
-        new PipelineManager(logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService), {
+      (logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService, projectResolver) =>
+        new PipelineManager(logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService, projectResolver), {
       singleton: true,
-      dependencies: ['logger', 'validation', 'apiManager', 'sshManager', 'postgresqlManager', 'cacheService', 'auditService'],
+      dependencies: ['logger', 'validation', 'apiManager', 'sshManager', 'postgresqlManager', 'cacheService', 'auditService', 'projectResolver'],
     });
   }
 

@@ -20,10 +20,11 @@ const {
 } = require('../utils/sql.cjs');
 
 class PostgreSQLManager {
-  constructor(logger, validation, profileService) {
+  constructor(logger, validation, profileService, projectResolver) {
     this.logger = logger.child('postgres');
     this.validation = validation;
     this.profileService = profileService;
+    this.projectResolver = projectResolver;
     this.pools = new Map();
     this.stats = {
       queries: 0,
@@ -326,9 +327,20 @@ class PostgreSQLManager {
     return pool;
   }
 
-  async resolveProfileName(profileName) {
+  async resolveProfileName(profileName, args = {}) {
     if (profileName) {
       return this.validation.ensureString(profileName, 'Profile name');
+    }
+
+    if (this.projectResolver) {
+      const context = await this.projectResolver.resolveContext(args);
+      const postgresProfile = context?.target?.postgres_profile;
+      if (postgresProfile) {
+        return this.validation.ensureString(String(postgresProfile), 'Profile name');
+      }
+      if (context) {
+        throw new Error(`Project target '${context.targetName}' is missing postgres_profile`);
+      }
     }
 
     const profiles = await this.profileService.listProfiles('postgresql');
@@ -346,7 +358,7 @@ class PostgreSQLManager {
   async resolveConnection(args) {
     const hasInlineConnection = args.connection || args.connection_url;
     if (!hasInlineConnection) {
-      const profileName = await this.resolveProfileName(args.profile_name);
+      const profileName = await this.resolveProfileName(args.profile_name, args);
       if (!profileName) {
         throw new Error('profile_name or connection is required');
       }

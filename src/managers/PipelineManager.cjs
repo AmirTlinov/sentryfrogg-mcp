@@ -12,7 +12,7 @@ const readline = require('readline');
 const { redactObject } = require('../utils/redact.cjs');
 
 class PipelineManager {
-  constructor(logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService) {
+  constructor(logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService, projectResolver) {
     this.logger = logger.child('pipeline');
     this.validation = validation;
     this.apiManager = apiManager;
@@ -20,6 +20,7 @@ class PipelineManager {
     this.postgresqlManager = postgresqlManager;
     this.cacheService = cacheService;
     this.auditService = auditService;
+    this.projectResolver = projectResolver;
   }
 
   async handleAction(args = {}) {
@@ -80,6 +81,78 @@ class PipelineManager {
     };
   }
 
+  mergeProjectContext(childArgs, rootArgs) {
+    if (!childArgs || typeof childArgs !== 'object') {
+      return childArgs;
+    }
+
+    const merged = { ...childArgs };
+
+    if (merged.project === undefined && merged.project_name === undefined) {
+      const rootProject = rootArgs?.project ?? rootArgs?.project_name;
+      if (rootProject !== undefined) {
+        merged.project = rootProject;
+      }
+    }
+
+    const hasTarget = merged.target !== undefined || merged.project_target !== undefined || merged.environment !== undefined;
+    if (!hasTarget) {
+      const rootTarget = rootArgs?.target ?? rootArgs?.project_target ?? rootArgs?.environment;
+      if (rootTarget !== undefined) {
+        merged.target = rootTarget;
+      }
+    }
+
+    return merged;
+  }
+
+  async hydrateProjectDefaults(args) {
+    if (!this.projectResolver) {
+      return args;
+    }
+
+    const needsSftpProfile = !!(args.sftp && typeof args.sftp === 'object' && !args.sftp.profile_name && !args.sftp.connection);
+    const needsPostgresProfile = !!(args.postgres && typeof args.postgres === 'object'
+      && !args.postgres.profile_name && !args.postgres.connection && !args.postgres.connection_url);
+    const explicitlyScoped = args.project !== undefined || args.project_name !== undefined
+      || args.target !== undefined || args.project_target !== undefined || args.environment !== undefined;
+
+    if (!explicitlyScoped && !needsSftpProfile && !needsPostgresProfile) {
+      return args;
+    }
+
+    const context = await this.projectResolver.resolveContext(args);
+    const target = context?.target || {};
+
+    const hydrated = { ...args };
+
+    if (args.http && typeof args.http === 'object') {
+      const httpArgs = this.mergeProjectContext(args.http, args);
+      if (!httpArgs.profile_name && target.api_profile) {
+        httpArgs.profile_name = String(target.api_profile);
+      }
+      hydrated.http = httpArgs;
+    }
+
+    if (args.postgres && typeof args.postgres === 'object') {
+      const postgresArgs = this.mergeProjectContext(args.postgres, args);
+      if (!postgresArgs.profile_name && target.postgres_profile) {
+        postgresArgs.profile_name = String(target.postgres_profile);
+      }
+      hydrated.postgres = postgresArgs;
+    }
+
+    if (args.sftp && typeof args.sftp === 'object') {
+      const sftpArgs = this.mergeProjectContext(args.sftp, args);
+      if (!sftpArgs.profile_name && target.ssh_profile) {
+        sftpArgs.profile_name = String(target.ssh_profile);
+      }
+      hydrated.sftp = sftpArgs;
+    }
+
+    return hydrated;
+  }
+
   async auditStage(stage, trace, details = {}, error = null) {
     if (!this.auditService) {
       return;
@@ -134,7 +207,7 @@ class PipelineManager {
   }
 
   async resolveHttpProfile(httpArgs) {
-    const profile = await this.apiManager.resolveProfile(httpArgs.profile_name);
+    const profile = await this.apiManager.resolveProfile(httpArgs.profile_name, httpArgs);
     let auth = httpArgs.auth !== undefined ? httpArgs.auth : profile.auth;
     const authProvider = httpArgs.auth_provider !== undefined ? httpArgs.auth_provider : profile.authProvider;
 
@@ -277,11 +350,12 @@ class PipelineManager {
   }
 
   async httpToSftp(args) {
-    const trace = this.buildTrace(args);
-    const { stream, cache, response } = await this.openHttpStream(args.http, args.cache, trace);
+    const hydrated = await this.hydrateProjectDefaults(args);
+    const trace = this.buildTrace(hydrated);
+    const { stream, cache, response } = await this.openHttpStream(hydrated.http, hydrated.cache, trace);
 
     await this.auditStage('http_fetch', trace, { url: response.url, method: response.method, cache });
-    const result = await this.uploadStreamToSftp(stream, args.sftp || {});
+    const result = await this.uploadStreamToSftp(stream, hydrated.sftp || {});
     await this.auditStage('sftp_upload', trace, { remote_path: result.remote_path });
 
     return {
@@ -294,9 +368,10 @@ class PipelineManager {
   }
 
   async sftpToHttp(args) {
-    const trace = this.buildTrace(args);
-    const httpArgs = args.http || {};
-    const sftpArgs = args.sftp || {};
+    const hydrated = await this.hydrateProjectDefaults(args);
+    const trace = this.buildTrace(hydrated);
+    const httpArgs = hydrated.http || {};
+    const sftpArgs = hydrated.sftp || {};
 
     const { profile, auth } = await this.resolveHttpProfile(httpArgs);
 
@@ -477,19 +552,20 @@ class PipelineManager {
   }
 
   async httpToPostgres(args) {
-    const trace = this.buildTrace(args);
-    const { stream, cache, response } = await this.openHttpStream(args.http, args.cache, trace);
+    const hydrated = await this.hydrateProjectDefaults(args);
+    const trace = this.buildTrace(hydrated);
+    const { stream, cache, response } = await this.openHttpStream(hydrated.http, hydrated.cache, trace);
 
     await this.auditStage('http_fetch', trace, { url: response.url, method: response.method, cache });
     const ingest = await this.ingestStream(stream, {
-      ...args.postgres,
-      format: args.format,
-      batch_size: args.batch_size,
-      max_rows: args.max_rows,
-      csv_header: args.csv_header,
-      csv_delimiter: args.csv_delimiter,
+      ...hydrated.postgres,
+      format: hydrated.format,
+      batch_size: hydrated.batch_size,
+      max_rows: hydrated.max_rows,
+      csv_header: hydrated.csv_header,
+      csv_delimiter: hydrated.csv_delimiter,
     });
-    await this.auditStage('postgres_insert', trace, { inserted: ingest.inserted, table: args.postgres?.table });
+    await this.auditStage('postgres_insert', trace, { inserted: ingest.inserted, table: hydrated.postgres?.table });
 
     return {
       success: true,
@@ -501,8 +577,9 @@ class PipelineManager {
   }
 
   async sftpToPostgres(args) {
-    const trace = this.buildTrace(args);
-    const sftpArgs = args.sftp || {};
+    const hydrated = await this.hydrateProjectDefaults(args);
+    const trace = this.buildTrace(hydrated);
+    const sftpArgs = hydrated.sftp || {};
 
     let ingest = { inserted: 0 };
     await this.sshManager.withSftp(sftpArgs, async (sftp) => {
@@ -510,16 +587,16 @@ class PipelineManager {
       const stream = sftp.createReadStream(remotePath);
       await this.auditStage('sftp_download', trace, { remote_path: remotePath });
       ingest = await this.ingestStream(stream, {
-        ...args.postgres,
-        format: args.format,
-        batch_size: args.batch_size,
-        max_rows: args.max_rows,
-        csv_header: args.csv_header,
-        csv_delimiter: args.csv_delimiter,
+        ...hydrated.postgres,
+        format: hydrated.format,
+        batch_size: hydrated.batch_size,
+        max_rows: hydrated.max_rows,
+        csv_header: hydrated.csv_header,
+        csv_delimiter: hydrated.csv_delimiter,
       });
     });
 
-    await this.auditStage('postgres_insert', trace, { inserted: ingest.inserted, table: args.postgres?.table });
+    await this.auditStage('postgres_insert', trace, { inserted: ingest.inserted, table: hydrated.postgres?.table });
 
     return {
       success: true,
@@ -530,8 +607,9 @@ class PipelineManager {
   }
 
   async postgresToSftp(args) {
-    const trace = this.buildTrace(args);
-    const exportArgs = this.buildExportArgs(args);
+    const hydrated = await this.hydrateProjectDefaults(args);
+    const trace = this.buildTrace(hydrated);
+    const exportArgs = this.buildExportArgs(hydrated);
     const { stream, completion } = this.postgresqlManager.exportStream(exportArgs);
 
     await this.auditStage('postgres_export', trace, {
@@ -540,7 +618,7 @@ class PipelineManager {
       format: exportArgs.format,
     });
 
-    const uploadPromise = this.uploadStreamToSftp(stream, args.sftp || {});
+    const uploadPromise = this.uploadStreamToSftp(stream, hydrated.sftp || {});
 
     try {
       const [sftpResult, exportResult] = await Promise.all([uploadPromise, completion]);
@@ -561,15 +639,16 @@ class PipelineManager {
     } catch (error) {
       stream.destroy(error);
       await completion.catch(() => null);
-      await this.auditStage('sftp_upload', trace, { remote_path: args.sftp?.remote_path }, error);
+      await this.auditStage('sftp_upload', trace, { remote_path: hydrated.sftp?.remote_path }, error);
       throw error;
     }
   }
 
   async postgresToHttp(args) {
-    const trace = this.buildTrace(args);
-    const httpArgs = { ...(args.http || {}) };
-    const exportArgs = this.buildExportArgs(args);
+    const hydrated = await this.hydrateProjectDefaults(args);
+    const trace = this.buildTrace(hydrated);
+    const httpArgs = { ...(hydrated.http || {}) };
+    const exportArgs = this.buildExportArgs(hydrated);
     const format = String(exportArgs.format || 'csv').toLowerCase();
 
     httpArgs.method = httpArgs.method || 'POST';
