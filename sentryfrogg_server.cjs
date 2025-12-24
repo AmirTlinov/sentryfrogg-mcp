@@ -50,6 +50,10 @@ const toolCatalog = [
           type: 'string',
           description: 'Название инструмента для детализации. Оставьте пустым для общего описания.',
         },
+        action: {
+          type: 'string',
+          description: 'Опционально: конкретный action внутри инструмента (например, exec/profile_upsert).',
+        },
         output: outputSchema,
         store_as: { type: ['string', 'object'] },
         store_scope: { type: 'string', enum: ['session', 'persistent'] },
@@ -610,11 +614,147 @@ class SentryFroggServer {
 
   handleHelp(args = {}) {
     this.ensureInitialized();
-    const tool = args.tool?.toLowerCase();
+    const rawTool = args.tool ? String(args.tool).trim().toLowerCase() : '';
+    const rawAction = args.action ? String(args.action).trim() : '';
+
+    const HELP_ALIASES = {
+      sql: 'mcp_psql_manager',
+      psql: 'mcp_psql_manager',
+      ssh: 'mcp_ssh_manager',
+      http: 'mcp_api_client',
+      api: 'mcp_api_client',
+      state: 'mcp_state',
+      project: 'mcp_project',
+      env: 'mcp_env',
+      runbook: 'mcp_runbook',
+      alias: 'mcp_alias',
+      preset: 'mcp_preset',
+      audit: 'mcp_audit',
+      pipeline: 'mcp_pipeline',
+      local: 'mcp_local',
+    };
+
+    const tool = rawTool ? (HELP_ALIASES[rawTool] || rawTool) : '';
+    const action = rawAction || '';
+
+    const extractActions = (toolName) => {
+      const schema = toolByName[toolName]?.inputSchema;
+      const actionEnum = schema?.properties?.action?.enum;
+      return Array.isArray(actionEnum) ? actionEnum.slice() : [];
+    };
+
+    const extractFields = (toolName) => {
+      const schema = toolByName[toolName]?.inputSchema;
+      const props = schema?.properties || {};
+      const ignored = new Set([
+        'action',
+        'output',
+        'store_as',
+        'store_scope',
+        'trace_id',
+        'span_id',
+        'parent_span_id',
+        'preset',
+        'preset_name',
+      ]);
+      return Object.keys(props).filter((key) => !ignored.has(key));
+    };
+
+    const buildExample = (toolName, actionName) => {
+      if (!toolName || !actionName) {
+        return null;
+      }
+
+      if (toolName === 'mcp_ssh_manager') {
+        switch (actionName) {
+          case 'profile_upsert':
+            return {
+              action: 'profile_upsert',
+              profile_name: 'my-ssh',
+              connection: { host: 'example.com', port: 22, username: 'root', private_key_path: '~/.ssh/id_ed25519' },
+            };
+          case 'authorized_keys_add':
+            return {
+              action: 'authorized_keys_add',
+              target: 'prod',
+              public_key_path: '~/.ssh/id_ed25519.pub',
+            };
+          case 'exec':
+            return {
+              action: 'exec',
+              target: 'prod',
+              command: 'uname -a',
+            };
+          default:
+            return { action: actionName };
+        }
+      }
+
+      if (toolName === 'mcp_project') {
+        switch (actionName) {
+          case 'project_upsert':
+            return {
+              action: 'project_upsert',
+              name: 'myapp',
+              project: {
+                default_target: 'prod',
+                targets: {
+                  prod: {
+                    ssh_profile: 'myapp-prod-ssh',
+                    env_profile: 'myapp-prod-env',
+                    postgres_profile: 'myapp-prod-db',
+                    api_profile: 'myapp-prod-api',
+                    cwd: '/opt/myapp',
+                    env_path: '/opt/myapp/.env',
+                  },
+                },
+              },
+            };
+          case 'project_use':
+            return { action: 'project_use', name: 'myapp', scope: 'persistent' };
+          default:
+            return { action: actionName };
+        }
+      }
+
+      if (toolName === 'mcp_env') {
+        switch (actionName) {
+          case 'profile_upsert':
+            return { action: 'profile_upsert', profile_name: 'myapp-prod-env', secrets: { DATABASE_URL: 'postgres://...' } };
+          case 'write_remote':
+            return { action: 'write_remote', target: 'prod', overwrite: false, backup: true };
+          case 'run_remote':
+            return { action: 'run_remote', target: 'prod', command: 'printenv | head' };
+          default:
+            return { action: actionName };
+        }
+      }
+
+      if (toolName === 'mcp_psql_manager') {
+        switch (actionName) {
+          case 'query':
+            return { action: 'query', target: 'prod', sql: 'SELECT 1' };
+          default:
+            return { action: actionName };
+        }
+      }
+
+      if (toolName === 'mcp_api_client') {
+        switch (actionName) {
+          case 'request':
+            return { action: 'request', target: 'prod', method: 'GET', url: '/health' };
+          default:
+            return { action: actionName };
+        }
+      }
+
+      return { action: actionName };
+    };
+
     const summaries = {
       help: {
         description: 'Показывает справку. Передайте `tool`, чтобы получить детали по инструменту.',
-        usage: "call_tool → name: 'help', arguments: { tool?: string }",
+        usage: "call_tool → name: 'help', arguments: { tool?: string, action?: string }",
       },
       mcp_psql_manager: {
         description: 'PostgreSQL: профили, запросы, транзакции, CRUD, select/count/exists/export + bulk insert.',
@@ -622,7 +762,7 @@ class SentryFroggServer {
       },
       mcp_ssh_manager: {
         description: 'SSH: профили, exec/batch, диагностика и SFTP.',
-        usage: "profile_upsert/profile_list → exec/batch/system_info/check_host/sftp_*",
+        usage: "profile_upsert/profile_list → (optional) authorized_keys_add → exec/batch/system_info/check_host/sftp_*",
       },
       mcp_api_client: {
         description: 'HTTP: профили, request/paginate/download, retry/backoff, auth providers + cache.',
@@ -669,18 +809,56 @@ class SentryFroggServer {
       };
     }
 
-    if (tool && summaries[tool]) {
-      return summaries[tool];
+    if (tool) {
+      if (!summaries[tool]) {
+        return {
+          error: `Неизвестный инструмент: ${tool}`,
+          known_tools: Object.keys(summaries).sort(),
+          hint: "Попробуйте: { tool: 'mcp_ssh_manager' } или { tool: 'ssh' }",
+        };
+      }
+
+      const actions = extractActions(tool);
+      const fields = extractFields(tool);
+      const entry = {
+        name: tool,
+        description: summaries[tool].description,
+        usage: summaries[tool].usage,
+        actions,
+        fields,
+        hint: action
+          ? `help({ tool: '${tool}', action: '${action}' })`
+          : `help({ tool: '${tool}', action: '<action>' })`,
+      };
+
+      if (action) {
+        if (actions.length > 0 && !actions.includes(action)) {
+          return {
+            ...entry,
+            error: `Неизвестный action для ${tool}: ${action}`,
+            known_actions: actions,
+          };
+        }
+        return {
+          ...entry,
+          action,
+          example: buildExample(tool, action),
+        };
+      }
+
+      return entry;
     }
 
     return {
       overview: isUnsafeLocalEnabled()
         ? 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, runbook, alias, preset, audit, pipeline и (unsafe) local инструменты. Можно использовать профиль или inline-подключение в каждом вызове.'
         : 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, runbook, alias, preset, audit и pipeline инструменты. Можно использовать профиль или inline-подключение в каждом вызове.',
+      usage: "help({ tool: 'mcp_ssh_manager' }) или help({ tool: 'mcp_ssh_manager', action: 'exec' })",
       tools: Object.entries(summaries).map(([key, value]) => ({
         name: key,
         description: value.description,
         usage: value.usage,
+        actions: extractActions(key),
       })),
     };
   }

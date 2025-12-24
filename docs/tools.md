@@ -44,6 +44,41 @@ Example:
 }
 ```
 
+## Quick start: `project` → `target`
+
+The intended UX is: **bind profiles to a project target once → then call tools with only `target`**.
+
+1) Create profiles (`mcp_ssh_manager`, `mcp_env`, `mcp_psql_manager`, `mcp_api_client`)  
+2) Bind them under a project target (`mcp_project.project_upsert`)  
+3) Activate the project (`mcp_project.project_use`, `scope: "persistent"`)  
+4) Use `ssh`/`env`/`psql`/`api` with just `target` (and an action-specific payload)
+
+Minimal flow example:
+
+```json
+{ "action": "project_use", "name": "myapp", "scope": "persistent" }
+```
+
+```json
+{ "action": "exec", "target": "prod", "command": "uname -a" }
+```
+
+```json
+{ "action": "write_remote", "target": "prod" }
+```
+
+```json
+{ "action": "query", "target": "prod", "sql": "SELECT 1" }
+```
+
+```json
+{ "action": "request", "target": "prod", "method": "GET", "url": "/health" }
+```
+
+Notes:
+- When a project is active, `project` is optional (tools will pick it up from state).
+- When a target is resolvable, `profile_name` can often be omitted (it is inferred from `project target.*_profile`).
+
 ## `help`
 
 Purpose: discover available tools and their intended usage.
@@ -52,6 +87,12 @@ Example:
 
 ```json
 { "tool": "mcp_psql_manager" }
+```
+
+Drill down into a specific action:
+
+```json
+{ "tool": "mcp_ssh_manager", "action": "exec" }
 ```
 
 ## `mcp_state`
@@ -153,11 +194,18 @@ Write remote `.env` (safe by default):
 }
 ```
 
+Project-aware example (uses `project target.ssh_profile` + `project target.env_profile` + `target.env_path` defaults):
+
+```json
+{ "action": "write_remote", "target": "prod", "overwrite": true, "backup": true }
+```
+
 Notes:
 - `write_remote` is atomic (temp + rename).
 - `overwrite` defaults to `false` and refuses to replace an existing file unless enabled.
 - If `remote_path` is omitted, it can default from `project target.env_path` or `project target.cwd + '/.env'`.
 - `run_remote` can default `cwd` from `project target.cwd`.
+- `profile_name` refers to the env profile; `ssh_profile_name` refers to the SSH profile (they can be inferred from project bindings).
 - `profile_get` only reveals secret values when `include_secrets: true` **and** `SENTRYFROGG_ALLOW_SECRET_EXPORT=1` (or `SF_ALLOW_SECRET_EXPORT=1`) is set.
 
 ## `mcp_runbook`
