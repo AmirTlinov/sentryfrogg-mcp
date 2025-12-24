@@ -7,6 +7,7 @@ const { Writable } = require('node:stream');
 
 const ProfileService = require('../src/services/ProfileService.cjs');
 const EnvManager = require('../src/managers/EnvManager.cjs');
+const SecretRefResolver = require('../src/services/SecretRefResolver.cjs');
 
 const loggerStub = {
   child() {
@@ -112,7 +113,8 @@ test('EnvManager resolves ref:vault:kv2 values when writing remote env', async (
     async ensureRemoteDir() {},
   };
 
-  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, null, vaultClientStub);
+  const secretRefResolver = new SecretRefResolver(loggerStub, validationStub, profileService, vaultClientStub, null);
+  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, null, secretRefResolver);
 
   await envManager.profileUpsert('bundle', {
     secrets: {
@@ -206,7 +208,8 @@ test('EnvManager can infer vault profile from project target', async (t) => {
     async ensureRemoteDir() {},
   };
 
-  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, projectResolverStub, vaultClientStub);
+  const secretRefResolver = new SecretRefResolver(loggerStub, validationStub, profileService, vaultClientStub, projectResolverStub);
+  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, projectResolverStub, secretRefResolver);
 
   await envManager.profileUpsert('bundle', {
     secrets: {

@@ -13,6 +13,7 @@ const { pipeline } = require('stream/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { getPathValue } = require('../utils/dataPath.cjs');
+const { isTruthy } = require('../utils/featureFlags.cjs');
 const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic.cjs');
 
 const execFileAsync = promisify(execFile);
@@ -95,6 +96,7 @@ class APIManager {
     this.profileService = profileService;
     this.cacheService = cacheService;
     this.projectResolver = options.projectResolver;
+    this.secretRefResolver = options.secretRefResolver;
     this.fetch = options.fetch ?? fetchFn;
     this.tokenCache = new Map();
     this.stats = {
@@ -325,9 +327,13 @@ class APIManager {
     this.tokenCache.set(key, { token, expiresAt });
   }
 
-  async resolveAuthProvider(provider, profileName) {
+  async resolveAuthProvider(provider, profileName, args = {}) {
     if (!provider) {
       return undefined;
+    }
+
+    if (this.secretRefResolver) {
+      provider = await this.secretRefResolver.resolveDeep(provider, args);
     }
 
     let type = String(provider.type || '').toLowerCase();
@@ -482,9 +488,22 @@ class APIManager {
   async profileGet(profileName, includeSecrets = false) {
     const name = this.validation.ensureString(profileName, 'Profile name');
     const profile = await this.profileService.getProfile(name, 'api');
+
+    const allow = isTruthy(process.env.SENTRYFROGG_ALLOW_SECRET_EXPORT) || isTruthy(process.env.SF_ALLOW_SECRET_EXPORT);
+    if (includeSecrets && allow) {
+      return { success: true, profile };
+    }
+
+    const secretKeys = profile.secrets ? Object.keys(profile.secrets).sort() : [];
     return {
       success: true,
-      profile: includeSecrets ? profile : { name: profile.name, type: profile.type, data: profile.data },
+      profile: {
+        name: profile.name,
+        type: profile.type,
+        data: profile.data,
+        secrets: secretKeys,
+        secrets_redacted: true,
+      },
     };
   }
 
@@ -583,8 +602,13 @@ class APIManager {
 
     const profile = await this.profileService.getProfile(profileName, 'api');
     const data = profile.data || {};
-    const auth = this.mergeAuth(data.auth, profile.secrets || {});
-    const authProvider = this.mergeAuthProvider(data.auth_provider, profile.secrets || {});
+    let auth = this.mergeAuth(data.auth, profile.secrets || {});
+    let authProvider = this.mergeAuthProvider(data.auth_provider, profile.secrets || {});
+
+    if (this.secretRefResolver) {
+      auth = await this.secretRefResolver.resolveDeep(auth, args);
+      authProvider = await this.secretRefResolver.resolveDeep(authProvider, args);
+    }
 
     return {
       name: profileName,
@@ -975,7 +999,7 @@ class APIManager {
     const authProvider = args.auth_provider !== undefined ? args.auth_provider : profile.authProvider;
 
     if (authProvider) {
-      auth = await this.resolveAuthProvider(authProvider, profile.name);
+      auth = await this.resolveAuthProvider(authProvider, profile.name, args);
     }
 
     try {
@@ -1025,7 +1049,7 @@ class APIManager {
     const authProvider = args.auth_provider !== undefined ? args.auth_provider : profile.authProvider;
 
     if (authProvider) {
-      auth = await this.resolveAuthProvider(authProvider, profile.name);
+      auth = await this.resolveAuthProvider(authProvider, profile.name, args);
     }
 
     const pagination = this.normalizePagination(args.pagination, profile.pagination);
@@ -1184,7 +1208,7 @@ class APIManager {
     const authProvider = args.auth_provider !== undefined ? args.auth_provider : profile.authProvider;
 
     if (authProvider) {
-      auth = await this.resolveAuthProvider(authProvider, profile.name);
+      auth = await this.resolveAuthProvider(authProvider, profile.name, args);
     }
 
     const policy = this.normalizeRetryPolicy(args.retry, profile.retry, args.method);

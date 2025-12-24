@@ -20,6 +20,12 @@ const loggerStub = {
   error() {},
 };
 
+const secretRefResolverStub = {
+  async resolveDeep(value) {
+    return value;
+  },
+};
+
 const validationStub = {
   ensureString(value, _label, { trim = true } = {}) {
     if (typeof value !== 'string' || value.trim().length === 0) {
@@ -197,7 +203,7 @@ test('EnvManager write_remote uploads deterministic dotenv content (no values in
     },
   };
 
-  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, null);
+  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, null, secretRefResolverStub);
 
   await envManager.profileUpsert('bundle', {
     secrets: {
@@ -271,7 +277,7 @@ test('EnvManager write_remote refuses to overwrite existing remote_path by defau
     },
   };
 
-  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, null);
+  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, null, secretRefResolverStub);
 
   await envManager.profileUpsert('bundle', {
     secrets: { A: '1' },
@@ -368,7 +374,7 @@ test('EnvManager write_remote defaults remote_path from project target.env_path'
     },
   };
 
-  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, resolver);
+  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, resolver, secretRefResolverStub);
 
   await envManager.profileUpsert('bundle', { secrets: { A: '1' } });
 
@@ -429,7 +435,7 @@ test('EnvManager run_remote defaults cwd from project target.cwd', async (t) => 
     },
   };
 
-  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, resolver);
+  const envManager = new EnvManager(loggerStub, validationStub, profileService, sshManagerStub, resolver, secretRefResolverStub);
 
   await envManager.profileUpsert('bundle', { secrets: { A: '1' } });
 

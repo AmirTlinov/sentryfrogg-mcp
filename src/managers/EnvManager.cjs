@@ -71,18 +71,18 @@ function renderDotenv(vars) {
 
   entries.sort(([a], [b]) => a.localeCompare(b));
 
-const lines = entries.map(([key, value]) => `${key}=${escapeEnvValue(value)}`);
+  const lines = entries.map(([key, value]) => `${key}=${escapeEnvValue(value)}`);
   return `${lines.join('\n')}\n`;
 }
 
 class EnvManager {
-  constructor(logger, validation, profileService, sshManager, projectResolver, vaultClient) {
+  constructor(logger, validation, profileService, sshManager, projectResolver, secretRefResolver) {
     this.logger = logger.child('env');
     this.validation = validation;
     this.profileService = profileService;
     this.sshManager = sshManager;
     this.projectResolver = projectResolver;
-    this.vaultClient = vaultClient;
+    this.secretRefResolver = secretRefResolver;
   }
 
   async handleAction(args = {}) {
@@ -195,79 +195,6 @@ class EnvManager {
     };
   }
 
-  async resolveVaultProfileName(args) {
-    if (args.vault_profile_name) {
-      return this.validation.ensureString(String(args.vault_profile_name), 'vault_profile_name');
-    }
-    if (args.vault_profile) {
-      return this.validation.ensureString(String(args.vault_profile), 'vault_profile');
-    }
-
-    if (this.projectResolver) {
-      const context = await this.projectResolver.resolveContext(args);
-      const vaultProfile = context?.target?.vault_profile;
-      if (vaultProfile) {
-        return this.validation.ensureString(String(vaultProfile), 'vault_profile');
-      }
-    }
-
-    const profiles = await this.profileService.listProfiles('vault');
-    if (profiles.length === 1) {
-      return profiles[0].name;
-    }
-    if (profiles.length === 0) {
-      throw new Error('vault profile is required (no vault profiles exist)');
-    }
-    throw new Error('vault profile is required when multiple vault profiles exist');
-  }
-
-  async resolveSecretRefs(vars, args) {
-    const resolved = {};
-    for (const [key, raw] of Object.entries(vars || {})) {
-      if (raw === null || raw === undefined) {
-        resolved[key] = raw;
-        continue;
-      }
-      if (typeof raw !== 'string') {
-        resolved[key] = String(raw);
-        continue;
-      }
-
-      const value = raw;
-      if (!value.startsWith('ref:')) {
-        resolved[key] = value;
-        continue;
-      }
-
-      const spec = value.slice(4);
-      if (spec.startsWith('vault:kv2:')) {
-        if (!this.vaultClient) {
-          throw new Error('vault refs require VaultClient (server misconfiguration)');
-        }
-        const ref = spec.slice('vault:kv2:'.length);
-        const vaultProfileName = await this.resolveVaultProfileName(args);
-        resolved[key] = await this.vaultClient.kv2Get(vaultProfileName, ref, { timeout_ms: args.timeout_ms });
-        continue;
-      }
-
-      if (spec.startsWith('env:')) {
-        const envKey = spec.slice('env:'.length).trim();
-        if (!envKey) {
-          throw new Error('ref:env requires a non-empty env var name');
-        }
-        const fromEnv = process.env[envKey];
-        if (fromEnv === undefined) {
-          throw new Error(`ref:env var is not set: ${envKey}`);
-        }
-        resolved[key] = String(fromEnv);
-        continue;
-      }
-
-      throw new Error(`Unknown secret ref scheme: ${spec.split(':')[0]}`);
-    }
-    return resolved;
-  }
-
   async profileUpsert(profileName, params) {
     const name = this.validation.ensureString(profileName, 'Profile name');
 
@@ -355,7 +282,7 @@ class EnvManager {
     const keepBackup = args.backup === true;
 
     const bundle = await this.loadEnvBundle(envProfileName);
-    const resolvedVars = await this.resolveSecretRefs(bundle.variables, args);
+    const resolvedVars = await this.secretRefResolver.resolveDeep(bundle.variables, args);
     const content = renderDotenv(resolvedVars);
 
     const projectDefaults = !remotePath ? await this.resolveProfilesFromProject(args) : null;
@@ -490,7 +417,7 @@ class EnvManager {
       : (defaults?.cwd ? String(defaults.cwd) : undefined);
 
     const bundle = await this.loadEnvBundle(envProfileName);
-    const resolvedVars = await this.resolveSecretRefs(bundle.variables, args);
+    const resolvedVars = await this.secretRefResolver.resolveDeep(bundle.variables, args);
     const env = Object.fromEntries(
       Object.entries(resolvedVars).map(([key, value]) => [normalizeEnvKey(key), String(value ?? '')])
     );

@@ -144,6 +144,7 @@ class ServiceBootstrap {
     const Validation = require('../services/Validation.cjs');
     const ProfileService = require('../services/ProfileService.cjs');
     const VaultClient = require('../services/VaultClient.cjs');
+    const SecretRefResolver = require('../services/SecretRefResolver.cjs');
     const StateService = require('../services/StateService.cjs');
     const ProjectService = require('../services/ProjectService.cjs');
     const ProjectResolver = require('../services/ProjectResolver.cjs');
@@ -206,6 +207,13 @@ class ServiceBootstrap {
       dependencies: ['validation', 'projectService', 'stateService'],
     });
 
+    // SecretRef resolver (Vault/ENV refs)
+    this.container.register('secretRefResolver', (logger, validation, profileService, vaultClient, projectResolver) =>
+      new SecretRefResolver(logger, validation, profileService, vaultClient, projectResolver), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'profileService', 'vaultClient', 'projectResolver'],
+    });
+
     // Runbook сервис
     this.container.register('runbookService', (logger) =>
       new RunbookService(logger), {
@@ -261,26 +269,26 @@ class ServiceBootstrap {
 
     // PostgreSQL Manager
     this.container.register('postgresqlManager', 
-      (logger, validation, profileService, projectResolver) => 
-        new PostgreSQLManager(logger, validation, profileService, projectResolver), { 
+      (logger, validation, profileService, projectResolver, secretRefResolver) => 
+        new PostgreSQLManager(logger, validation, profileService, projectResolver, secretRefResolver), { 
       singleton: true,
-      dependencies: ['logger', 'validation', 'profileService', 'projectResolver'] 
+      dependencies: ['logger', 'validation', 'profileService', 'projectResolver', 'secretRefResolver'] 
     });
 
     // SSH Manager
     this.container.register('sshManager', 
-      (logger, security, validation, profileService, projectResolver) => 
-        new SSHManager(logger, security, validation, profileService, projectResolver), { 
+      (logger, security, validation, profileService, projectResolver, secretRefResolver) => 
+        new SSHManager(logger, security, validation, profileService, projectResolver, secretRefResolver), { 
       singleton: true,
-      dependencies: ['logger', 'security', 'validation', 'profileService', 'projectResolver'] 
+      dependencies: ['logger', 'security', 'validation', 'profileService', 'projectResolver', 'secretRefResolver'] 
     });
 
     // API Manager
     this.container.register('apiManager', 
-      (logger, security, validation, profileService, cacheService, projectResolver) => 
-        new APIManager(logger, security, validation, profileService, cacheService, { projectResolver }), { 
+      (logger, security, validation, profileService, cacheService, projectResolver, secretRefResolver) => 
+        new APIManager(logger, security, validation, profileService, cacheService, { projectResolver, secretRefResolver }), { 
       singleton: true,
-      dependencies: ['logger', 'security', 'validation', 'profileService', 'cacheService', 'projectResolver'] 
+      dependencies: ['logger', 'security', 'validation', 'profileService', 'cacheService', 'projectResolver', 'secretRefResolver'] 
     });
 
     if (isUnsafeLocalEnabled()) {
@@ -310,10 +318,10 @@ class ServiceBootstrap {
 
     // Env Manager
     this.container.register('envManager',
-      (logger, validation, profileService, sshManager, projectResolver, vaultClient) =>
-        new EnvManager(logger, validation, profileService, sshManager, projectResolver, vaultClient), {
+      (logger, validation, profileService, sshManager, projectResolver, secretRefResolver) =>
+        new EnvManager(logger, validation, profileService, sshManager, projectResolver, secretRefResolver), {
       singleton: true,
-      dependencies: ['logger', 'validation', 'profileService', 'sshManager', 'projectResolver', 'vaultClient'],
+      dependencies: ['logger', 'validation', 'profileService', 'sshManager', 'projectResolver', 'secretRefResolver'],
     });
 
     // Vault Manager

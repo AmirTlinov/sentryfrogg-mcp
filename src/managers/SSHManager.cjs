@@ -9,6 +9,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const { Client } = require('ssh2');
 const Constants = require('../constants/Constants.cjs');
+const { isTruthy } = require('../utils/featureFlags.cjs');
 
 function profileKey(profileName) {
   return profileName;
@@ -63,12 +64,13 @@ function fingerprintPublicKeySha256(line) {
 }
 
 class SSHManager {
-  constructor(logger, security, validation, profileService, projectResolver) {
+  constructor(logger, security, validation, profileService, projectResolver, secretRefResolver) {
     this.logger = logger.child('ssh');
     this.security = security;
     this.validation = validation;
     this.profileService = profileService;
     this.projectResolver = projectResolver;
+    this.secretRefResolver = secretRefResolver;
     this.connections = new Map();
     this.stats = {
       commands: 0,
@@ -240,17 +242,21 @@ class SSHManager {
     return config;
   }
 
-  async materializeConnection(connection) {
-    const config = this.buildConnectConfig(connection);
+  async materializeConnection(connection, args = {}) {
+    const resolvedConnection = this.secretRefResolver
+      ? await this.secretRefResolver.resolveDeep(connection, args)
+      : connection;
 
-    const privateKey = await this.loadPrivateKey(connection);
+    const config = this.buildConnectConfig(resolvedConnection);
+
+    const privateKey = await this.loadPrivateKey(resolvedConnection);
     if (privateKey) {
       config.privateKey = privateKey;
-      if (connection.passphrase) {
-        config.passphrase = connection.passphrase;
+      if (resolvedConnection.passphrase) {
+        config.passphrase = resolvedConnection.passphrase;
       }
-    } else if (connection.password) {
-      config.password = connection.password;
+    } else if (resolvedConnection.password) {
+      config.password = resolvedConnection.password;
     } else {
       throw new Error('Provide password or private_key for SSH connection');
     }
@@ -323,9 +329,22 @@ class SSHManager {
   async profileGet(profileName, includeSecrets = false) {
     const name = this.validation.ensureString(profileName, 'Profile name');
     const profile = await this.profileService.getProfile(name, 'ssh');
+
+    const allow = isTruthy(process.env.SENTRYFROGG_ALLOW_SECRET_EXPORT) || isTruthy(process.env.SF_ALLOW_SECRET_EXPORT);
+    if (includeSecrets && allow) {
+      return { success: true, profile };
+    }
+
+    const secretKeys = profile.secrets ? Object.keys(profile.secrets).sort() : [];
     return {
       success: true,
-      profile: includeSecrets ? profile : { name: profile.name, type: profile.type, data: profile.data },
+      profile: {
+        name: profile.name,
+        type: profile.type,
+        data: profile.data,
+        secrets: secretKeys,
+        secrets_redacted: true,
+      },
     };
   }
 
@@ -343,7 +362,7 @@ class SSHManager {
 
   async profileTest(args) {
     const { connection } = await this.resolveConnection(args);
-    const entry = await this.createClient(await this.materializeConnection(connection), Symbol('test'));
+    const entry = await this.createClient(await this.materializeConnection(connection, args), Symbol('test'));
     try {
       await this.exec(entry.client, 'echo "test"');
     } finally {
@@ -352,14 +371,19 @@ class SSHManager {
     return { success: true };
   }
 
-  async withClient(profileName, handler) {
+  async withClient(profileName, args, handler) {
+    if (typeof args === 'function') {
+      handler = args;
+      args = {};
+    }
+
     const profile = await this.profileService.getProfile(profileName, 'ssh');
     const key = profileKey(profileName);
 
     let entry = this.connections.get(key);
     if (!entry || entry.closed) {
       const connection = this.mergeProfile(profile);
-      entry = await this.createClient(await this.materializeConnection(connection), key);
+      entry = await this.createClient(await this.materializeConnection(connection, args), key);
       this.connections.set(key, entry);
     }
 
@@ -453,13 +477,13 @@ class SSHManager {
   async withSftp(args, handler) {
     const { connection, profileName } = await this.resolveConnection(args);
     if (profileName) {
-      return this.withClient(profileName, async (client) => {
+      return this.withClient(profileName, args, async (client) => {
         const sftp = await this.getSftp(client);
         return handler(sftp);
       });
     }
 
-    const entry = await this.createClient(await this.materializeConnection(connection), Symbol('sftp-inline'));
+    const entry = await this.createClient(await this.materializeConnection(connection, args), Symbol('sftp-inline'));
     try {
       const sftp = await this.getSftp(entry.client);
       return await handler(sftp);
@@ -522,7 +546,7 @@ class SSHManager {
 
     try {
       const result = profileName
-        ? await this.withClient(profileName, (client) => this.exec(client, command, options, args))
+        ? await this.withClient(profileName, args, (client) => this.exec(client, command, options, args))
         : await this.execOnce(connection, command, options, args);
 
       this.stats.commands += 1;
@@ -535,7 +559,7 @@ class SSHManager {
   }
 
   async execOnce(connection, command, options, args) {
-    const connectConfig = await this.materializeConnection(connection);
+    const connectConfig = await this.materializeConnection(connection, args);
     const entry = await this.createClient(connectConfig, Symbol('inline'));
     try {
       return await this.exec(entry.client, command, options, args);

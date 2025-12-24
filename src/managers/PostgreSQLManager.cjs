@@ -12,6 +12,7 @@ const { createWriteStream } = require('fs');
 const { PassThrough } = require('stream');
 const { Pool } = require('pg');
 const Constants = require('../constants/Constants.cjs');
+const { isTruthy } = require('../utils/featureFlags.cjs');
 const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic.cjs');
 const {
   normalizeTableContext,
@@ -20,11 +21,12 @@ const {
 } = require('../utils/sql.cjs');
 
 class PostgreSQLManager {
-  constructor(logger, validation, profileService, projectResolver) {
+  constructor(logger, validation, profileService, projectResolver, secretRefResolver) {
     this.logger = logger.child('postgres');
     this.validation = validation;
     this.profileService = profileService;
     this.projectResolver = projectResolver;
+    this.secretRefResolver = secretRefResolver;
     this.pools = new Map();
     this.stats = {
       queries: 0,
@@ -366,7 +368,8 @@ class PostgreSQLManager {
       const profile = await this.profileService.getProfile(profileName, 'postgresql');
       const connection = this.mergeConnectionProfile(profile);
       const { config, poolOptions } = this.buildPoolConfig(connection);
-      return { connection: config, poolOptions, profileName };
+      const resolved = this.secretRefResolver ? await this.secretRefResolver.resolveDeep(config, args) : config;
+      return { connection: resolved, poolOptions, profileName };
     }
 
     const input = args.connection || {};
@@ -378,7 +381,8 @@ class PostgreSQLManager {
     }
 
     const { config, poolOptions } = this.buildPoolConfig(base);
-    return { connection: config, poolOptions, profileName: undefined };
+    const resolved = this.secretRefResolver ? await this.secretRefResolver.resolveDeep(config, args) : config;
+    return { connection: resolved, poolOptions, profileName: undefined };
   }
 
   async profileUpsert(profileName, params) {
@@ -407,7 +411,10 @@ class PostgreSQLManager {
     }
 
     const connectionForTest = this.mergeConnectionProfile({ data: profileData, secrets: { ...parsed.secrets, ...secrets } });
-    await this.testConnection(connectionForTest, params.pool);
+    const resolvedForTest = this.secretRefResolver
+      ? await this.secretRefResolver.resolveDeep(connectionForTest, params)
+      : connectionForTest;
+    await this.testConnection(resolvedForTest, params.pool);
 
     await this.profileService.setProfile(name, {
       type: 'postgresql',
@@ -424,9 +431,22 @@ class PostgreSQLManager {
   async profileGet(profileName, includeSecrets = false) {
     const name = this.validation.ensureString(profileName, 'Profile name');
     const profile = await this.profileService.getProfile(name, 'postgresql');
+
+    const allow = isTruthy(process.env.SENTRYFROGG_ALLOW_SECRET_EXPORT) || isTruthy(process.env.SF_ALLOW_SECRET_EXPORT);
+    if (includeSecrets && allow) {
+      return { success: true, profile };
+    }
+
+    const secretKeys = profile.secrets ? Object.keys(profile.secrets).sort() : [];
     return {
       success: true,
-      profile: includeSecrets ? profile : { name: profile.name, type: profile.type, data: profile.data },
+      profile: {
+        name: profile.name,
+        type: profile.type,
+        data: profile.data,
+        secrets: secretKeys,
+        secrets_redacted: true,
+      },
     };
   }
 

@@ -212,7 +212,7 @@ class PipelineManager {
     const authProvider = httpArgs.auth_provider !== undefined ? httpArgs.auth_provider : profile.authProvider;
 
     if (authProvider) {
-      auth = await this.apiManager.resolveAuthProvider(authProvider, profile.name);
+      auth = await this.apiManager.resolveAuthProvider(authProvider, profile.name, httpArgs);
     }
 
     return { profile, auth };
