@@ -80,6 +80,43 @@ test('authorized_keys_add reads .pub file and sends it via stdin', async () => {
   assert.ok(!String(captured.command).includes(blob));
 });
 
+test('authorized_keys_add expands ~ in public_key_path', async () => {
+  const manager = new SSHManager(loggerStub, securityStub, validationStub, profileServiceStub());
+
+  const previousHome = process.env.HOME;
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-ssh-home-'));
+  try {
+    process.env.HOME = tmpDir;
+
+    const pubPath = path.join(tmpDir, 'id_test.pub');
+    const blob = 'dGVzdA==';
+    const keyLine = `ssh-ed25519 ${blob} test@example\n`;
+    await fs.writeFile(pubPath, keyLine, 'utf8');
+
+    let captured = null;
+    manager.execCommand = async (args) => {
+      captured = args;
+      return { stdout: 'added', stderr: '', exitCode: 0 };
+    };
+
+    const result = await manager.handleAction({
+      action: 'authorized_keys_add',
+      profile_name: 'default',
+      public_key_path: '~/id_test.pub',
+    });
+
+    assert.equal(result.success, true);
+    assert.ok(captured);
+    assert.ok(String(captured.stdin).includes(`ssh-ed25519 ${blob}`));
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+  }
+});
+
 test('authorized_keys_add returns changed=false when key already present', async () => {
   const manager = new SSHManager(loggerStub, securityStub, validationStub, profileServiceStub());
   manager.execCommand = async () => ({ stdout: 'present', stderr: '', exitCode: 0 });
@@ -128,4 +165,3 @@ test('authorized_keys_add requires public_key or public_key_path', async () => {
     /public_key or public_key_path is required/
   );
 });
-

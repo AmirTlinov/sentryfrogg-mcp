@@ -79,6 +79,7 @@ Notes:
 - When a project is active, `project` is optional (tools will pick it up from state).
 - When a target is resolvable, `profile_name` can often be omitted (it is inferred from `project target.*_profile`).
 - If you use `ref:vault:kv2:*` secrets, select Vault via `vault_profile_name` / `vault_profile` or configure `project target.vault_profile`.
+- Local filesystem path arguments support `~` expansion to `$HOME` (where applicable).
 
 ## `help`
 

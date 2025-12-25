@@ -19,6 +19,7 @@ const path = require('node:path');
 
 const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic.cjs');
 const { isUnsafeLocalEnabled } = require('../utils/featureFlags.cjs');
+const { expandHomePath } = require('../utils/userPaths.cjs');
 
 function buildTempDir() {
   return path.join(os.tmpdir(), `sentryfrogg-local-${process.pid}`);
@@ -250,7 +251,7 @@ class LocalManager {
   }
 
   async fsRead(args) {
-    const filePath = this.validation.ensureString(args.path, 'path', { trim: false });
+    const filePath = expandHomePath(this.validation.ensureString(args.path, 'path', { trim: false }));
     const encoding = args.encoding ? String(args.encoding).toLowerCase() : 'utf8';
     const offset = Number.isInteger(args.offset) ? Math.max(0, args.offset) : 0;
     const length = Number.isInteger(args.length) ? Math.max(0, args.length) : null;
@@ -297,7 +298,7 @@ class LocalManager {
   }
 
   async fsWrite(args) {
-    const filePath = this.validation.ensureString(args.path, 'path', { trim: false });
+    const filePath = expandHomePath(this.validation.ensureString(args.path, 'path', { trim: false }));
     const overwrite = args.overwrite === true;
 
     if (!overwrite && await pathExists(filePath)) {
@@ -338,7 +339,7 @@ class LocalManager {
   }
 
   async fsList(args) {
-    const root = args.path ? this.validation.ensureString(args.path, 'path', { trim: false }) : '.';
+    const root = args.path ? expandHomePath(this.validation.ensureString(args.path, 'path', { trim: false })) : '.';
     const recursive = args.recursive === true;
     const maxDepth = Number.isInteger(args.max_depth) ? Math.max(0, args.max_depth) : 3;
     const withStats = args.with_stats === true;
@@ -384,7 +385,7 @@ class LocalManager {
   }
 
   async fsStat(args) {
-    const target = this.validation.ensureString(args.path, 'path', { trim: false });
+    const target = expandHomePath(this.validation.ensureString(args.path, 'path', { trim: false }));
     const stat = await fs.lstat(target);
     this.stats.fs_ops += 1;
     return {
@@ -404,7 +405,7 @@ class LocalManager {
   }
 
   async fsMkdir(args) {
-    const target = this.validation.ensureString(args.path, 'path', { trim: false });
+    const target = expandHomePath(this.validation.ensureString(args.path, 'path', { trim: false }));
     const recursive = args.recursive !== false;
     await fs.mkdir(target, { recursive, mode: 0o700 });
     this.stats.fs_ops += 1;
@@ -412,7 +413,7 @@ class LocalManager {
   }
 
   async fsRm(args) {
-    const target = this.validation.ensureString(args.path, 'path', { trim: false });
+    const target = expandHomePath(this.validation.ensureString(args.path, 'path', { trim: false }));
     const recursive = args.recursive === true;
     const force = args.force === true;
     await fs.rm(target, { recursive, force });

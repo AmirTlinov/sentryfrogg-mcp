@@ -15,6 +15,7 @@ const { promisify } = require('util');
 const { getPathValue } = require('../utils/dataPath.cjs');
 const { isTruthy } = require('../utils/featureFlags.cjs');
 const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic.cjs');
+const { expandHomePath } = require('../utils/userPaths.cjs');
 
 const execFileAsync = promisify(execFile);
 
@@ -1140,7 +1141,7 @@ class APIManager {
 
   async downloadOnce(args, profile, auth) {
     const config = this.buildRequestConfig(args, profile, auth);
-    const filePath = args.download_path || args.file_path;
+    const filePath = expandHomePath(args.download_path || args.file_path);
     if (!filePath) {
       throw new Error('download_path is required');
     }

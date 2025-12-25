@@ -91,3 +91,57 @@ test('sftpDownload refuses to overwrite local file by default', async () => {
     /already exists/
   );
 });
+
+test('sftpUpload expands ~ in local_path', async () => {
+  const manager = new SSHManager(loggerStub, securityStub, validationStub, profileServiceStub());
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-sftp-home-'));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = tmpDir;
+
+    let capturedLocal = null;
+    manager.withSftp = async (_args, handler) => handler({
+      fastPut(local, _remote, cb) {
+        capturedLocal = local;
+        cb(null);
+      },
+    });
+
+    await manager.sftpUpload({ local_path: '~/local.txt', remote_path: '/remote.txt', overwrite: true });
+    assert.equal(capturedLocal, path.join(tmpDir, 'local.txt'));
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+  }
+});
+
+test('sftpDownload expands ~ in local_path', async () => {
+  const manager = new SSHManager(loggerStub, securityStub, validationStub, profileServiceStub());
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-sftp-home-'));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = tmpDir;
+
+    let capturedLocal = null;
+    manager.withSftp = async (_args, handler) => handler({
+      fastGet(_remote, local, cb) {
+        capturedLocal = local;
+        cb(null);
+      },
+    });
+
+    await manager.sftpDownload({ remote_path: '/remote/file.txt', local_path: '~/file.txt', overwrite: true, mkdirs: true });
+    assert.equal(capturedLocal, path.join(tmpDir, 'file.txt'));
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+  }
+});

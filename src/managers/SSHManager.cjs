@@ -10,6 +10,7 @@ const path = require('path');
 const { Client } = require('ssh2');
 const Constants = require('../constants/Constants.cjs');
 const { isTruthy } = require('../utils/featureFlags.cjs');
+const { expandHomePath } = require('../utils/userPaths.cjs');
 
 function profileKey(profileName) {
   return profileName;
@@ -166,7 +167,7 @@ class SSHManager {
 
     if (args.public_key_path !== undefined) {
       const publicKeyPath = this.validation.ensureString(args.public_key_path, 'public_key_path', { trim: false });
-      const raw = await fs.readFile(publicKeyPath, 'utf8');
+      const raw = await fs.readFile(expandHomePath(publicKeyPath), 'utf8');
       return normalizePublicKeyLine(raw);
     }
 
@@ -237,7 +238,7 @@ class SSHManager {
     }
 
     if (connection.private_key_path) {
-      return fs.readFile(connection.private_key_path, 'utf8');
+      return fs.readFile(expandHomePath(connection.private_key_path), 'utf8');
     }
 
     return undefined;
@@ -837,7 +838,7 @@ class SSHManager {
   }
 
   async sftpUpload(args) {
-    const localPath = this.validation.ensureString(args.local_path, 'local_path');
+    const localPath = expandHomePath(this.validation.ensureString(args.local_path, 'local_path'));
     const remotePath = this.validation.ensureString(args.remote_path, 'remote_path');
     const overwrite = args.overwrite === true;
 
@@ -892,7 +893,7 @@ class SSHManager {
 
   async sftpDownload(args) {
     const remotePath = this.validation.ensureString(args.remote_path, 'remote_path');
-    const localPath = this.validation.ensureString(args.local_path, 'local_path');
+    const localPath = expandHomePath(this.validation.ensureString(args.local_path, 'local_path'));
     const overwrite = args.overwrite === true;
 
     if (!overwrite) {

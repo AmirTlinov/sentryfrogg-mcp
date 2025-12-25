@@ -136,3 +136,39 @@ test('APIManager download refuses to overwrite local files by default', async ()
 
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test('APIManager download expands ~ in download_path', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-download-home-'));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = dir;
+    const targetPath = path.join(dir, 'report.txt');
+    await fs.writeFile(targetPath, 'old');
+
+    const fetchStub = async () => createResponse({ status: 200, body: 'new' });
+    const manager = new APIManager(loggerStub, securityStub, validationStub, profileServiceStub(), null, { fetch: fetchStub });
+
+    await assert.rejects(
+      () => manager.download({ method: 'GET', url: 'https://example.com/report', download_path: '~/report.txt' }),
+      /Local path already exists/
+    );
+
+    const result = await manager.download({
+      method: 'GET',
+      url: 'https://example.com/report',
+      download_path: '~/report.txt',
+      overwrite: true,
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.file_path, targetPath);
+    assert.equal(await fs.readFile(targetPath, 'utf8'), 'new');
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

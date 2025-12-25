@@ -70,3 +70,28 @@ test('LocalManager fs_write refuses overwrite unless overwrite=true', async () =
   }
 });
 
+test('LocalManager fs_* expands ~ in path', async () => {
+  const manager = createLocalManager({ enabled: true });
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-local-home-'));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = dir;
+    const expandedPath = path.join(dir, 'note.txt');
+
+    await manager.handleAction({ action: 'fs_write', path: '~/note.txt', content: 'one' });
+    const read = await manager.handleAction({ action: 'fs_read', path: '~/note.txt' });
+    assert.equal(read.path, expandedPath);
+    assert.equal(read.content, 'one');
+
+    const stat = await manager.handleAction({ action: 'fs_stat', path: '~/note.txt' });
+    assert.equal(stat.path, expandedPath);
+    assert.equal(stat.type, 'file');
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
