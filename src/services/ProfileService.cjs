@@ -242,6 +242,36 @@ class ProfileService {
     return this.profiles.has(name);
   }
 
+  async probeProfileSecrets(name, expectedType) {
+    await this.ensureReady();
+
+    if (typeof name !== 'string' || name.trim().length === 0) {
+      return { ok: false, error: 'Profile name must be a non-empty string' };
+    }
+
+    const key = name.trim();
+    const entry = this.profiles.get(key);
+    if (!entry) {
+      return { ok: false, error: `Profile '${name}' not found` };
+    }
+    if (expectedType && entry.type !== expectedType) {
+      return { ok: false, error: `Profile '${name}' is of type '${entry.type}', expected '${expectedType}'` };
+    }
+
+    if (!entry.secrets || Object.keys(entry.secrets).length === 0) {
+      return { ok: true, encrypted: false };
+    }
+
+    try {
+      for (const value of Object.values(entry.secrets)) {
+        await this.security.decrypt(value);
+      }
+      return { ok: true, encrypted: true };
+    } catch (error) {
+      return { ok: false, encrypted: true, error: error.message };
+    }
+  }
+
   getStats() {
     return { ...this.stats, total: this.profiles.size };
   }

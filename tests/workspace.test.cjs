@@ -124,6 +124,7 @@ test('WorkspaceService summary returns suggestions', async (t) => {
   const workspace = new WorkspaceService(
     loggerStub,
     contextService,
+    null,
     projectResolver,
     profileService,
     runbookService,

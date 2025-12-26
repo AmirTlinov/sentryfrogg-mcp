@@ -158,6 +158,51 @@
         }
       },
       "effects": { "kind": "read", "requires_apply": false }
+    },
+    "preflight.k8s": {
+      "intent": "preflight.k8s",
+      "description": "Preflight kubectl + kubeconfig connectivity check.",
+      "runbook": "preflight.k8s",
+      "tags": ["k8s", "diagnostic", "read"],
+      "inputs": {
+        "required": ["namespace"],
+        "defaults": { "namespace": "default" },
+        "map": {
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["k8s"] },
+      "effects": { "kind": "read", "requires_apply": false }
+    },
+    "preflight.ssh": {
+      "intent": "preflight.ssh",
+      "description": "Preflight SSH connectivity and auth.",
+      "runbook": "preflight.ssh",
+      "tags": ["ssh", "diagnostic", "read"],
+      "inputs": {
+        "required": ["project_name", "target_name"],
+        "defaults": {},
+        "map": {
+          "project_name": "context.project_name",
+          "target_name": "context.target_name"
+        }
+      },
+      "effects": { "kind": "read", "requires_apply": false }
+    },
+    "preflight.node": {
+      "intent": "preflight.node",
+      "description": "Preflight Node.js and pnpm versions for repo.",
+      "runbook": "preflight.node",
+      "tags": ["node", "diagnostic", "read"],
+      "inputs": {
+        "required": [],
+        "defaults": {},
+        "map": {
+          "repo_path": "context.root"
+        }
+      },
+      "when": { "tags_any": ["node"] },
+      "effects": { "kind": "read", "requires_apply": false }
     }
   }
 }

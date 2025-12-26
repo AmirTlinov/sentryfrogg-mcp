@@ -172,6 +172,7 @@ class ServiceBootstrap {
     const ProjectResolver = require('../services/ProjectResolver.cjs');
     const RunbookService = require('../services/RunbookService.cjs');
     const ContextService = require('../services/ContextService.cjs');
+    const ContextSessionService = require('../services/ContextSessionService.cjs');
     const CapabilityService = require('../services/CapabilityService.cjs');
     const EvidenceService = require('../services/EvidenceService.cjs');
     const AliasService = require('../services/AliasService.cjs');
@@ -254,6 +255,13 @@ class ServiceBootstrap {
       dependencies: ['logger', 'projectResolver'],
     });
 
+    // ContextSession сервис
+    this.container.register('contextSessionService', (logger, contextService, projectResolver, profileService) =>
+      new ContextSessionService(logger, contextService, projectResolver, profileService), {
+      singleton: true,
+      dependencies: ['logger', 'contextService', 'projectResolver', 'profileService'],
+    });
+
     // Capability сервис
     this.container.register('capabilityService', (logger, security) =>
       new CapabilityService(logger, security), {
@@ -298,12 +306,25 @@ class ServiceBootstrap {
 
     // Workspace сервис
     this.container.register('workspaceService',
-      (logger, contextService, projectResolver, profileService, runbookService, capabilityService, projectService, aliasService, presetService, stateService) =>
-        new WorkspaceService(logger, contextService, projectResolver, profileService, runbookService, capabilityService, projectService, aliasService, presetService, stateService), {
+      (logger, contextService, contextSessionService, projectResolver, profileService, runbookService, capabilityService, projectService, aliasService, presetService, stateService) =>
+        new WorkspaceService(
+          logger,
+          contextService,
+          contextSessionService,
+          projectResolver,
+          profileService,
+          runbookService,
+          capabilityService,
+          projectService,
+          aliasService,
+          presetService,
+          stateService
+        ), {
       singleton: true,
       dependencies: [
         'logger',
         'contextService',
+        'contextSessionService',
         'projectResolver',
         'profileService',
         'runbookService',

@@ -421,5 +421,99 @@
         }
       }
     ]
+  },
+  "preflight.k8s": {
+    "description": "Preflight kubectl + kubeconfig connectivity check.",
+    "tags": ["k8s", "diagnostic", "read"],
+    "inputs": ["kubeconfig", "namespace"],
+    "steps": [
+      {
+        "id": "kubectl_version",
+        "tool": "mcp_local",
+        "args": {
+          "action": "exec",
+          "command": "kubectl",
+          "args": ["version", "--short"],
+          "env": {
+            "KUBECONFIG": "{{ ?input.kubeconfig }}"
+          },
+          "inline": true
+        }
+      },
+      {
+        "id": "cluster_access",
+        "tool": "mcp_local",
+        "args": {
+          "action": "exec",
+          "command": "kubectl",
+          "args": ["get", "ns", "--request-timeout=5s"],
+          "env": {
+            "KUBECONFIG": "{{ ?input.kubeconfig }}"
+          },
+          "inline": true
+        }
+      }
+    ]
+  },
+  "preflight.ssh": {
+    "description": "Preflight SSH connectivity and auth.",
+    "tags": ["ssh", "diagnostic", "read"],
+    "inputs": ["project_name", "target_name"],
+    "steps": [
+      {
+        "id": "check",
+        "tool": "mcp_ssh_manager",
+        "args": {
+          "action": "check_host",
+          "project": "{{ input.project_name }}",
+          "target": "{{ input.target_name }}"
+        }
+      }
+    ]
+  },
+  "preflight.node": {
+    "description": "Preflight Node.js and pnpm versions for repo.",
+    "tags": ["node", "diagnostic", "read"],
+    "inputs": ["repo_path"],
+    "steps": [
+      {
+        "id": "node_version",
+        "tool": "mcp_local",
+        "args": {
+          "action": "exec",
+          "command": "node",
+          "args": ["-v"],
+          "cwd": "{{ ?input.repo_path }}",
+          "inline": true
+        }
+      },
+      {
+        "id": "pnpm_version",
+        "tool": "mcp_local",
+        "continue_on_error": true,
+        "args": {
+          "action": "exec",
+          "command": "pnpm",
+          "args": ["-v"],
+          "cwd": "{{ ?input.repo_path }}",
+          "inline": true
+        }
+      },
+      {
+        "id": "node_engine",
+        "tool": "mcp_local",
+        "continue_on_error": true,
+        "args": {
+          "action": "exec",
+          "command": "node",
+          "args": [
+            "-e",
+            "const fs=require('fs');const p=require('path');const file=p.join(process.cwd(),'package.json');if(fs.existsSync(file)){const pkg=require(file);console.log(pkg.engines?.node||'');}"
+          ],
+          "cwd": "{{ ?input.repo_path }}",
+          "inline": true
+        }
+      }
+    ]
   }
 }

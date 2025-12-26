@@ -10,6 +10,7 @@ const { buildStorePaths } = require('../utils/storeLayout.cjs');
 const { resolveStoreInfo } = require('../utils/paths.cjs');
 const { ensureDirForFile, pathExists } = require('../utils/fsAtomic.cjs');
 const { matchesWhen, matchTags } = require('../utils/whenMatcher.cjs');
+const { getPathValue } = require('../utils/dataPath.cjs');
 
 async function findGitRoot(startDir) {
   if (!startDir) {
@@ -60,9 +61,22 @@ function normalizeStringArray(value) {
 }
 
 class WorkspaceService {
-  constructor(logger, contextService, projectResolver, profileService, runbookService, capabilityService, projectService, aliasService, presetService, stateService) {
+  constructor(
+    logger,
+    contextService,
+    contextSessionService,
+    projectResolver,
+    profileService,
+    runbookService,
+    capabilityService,
+    projectService,
+    aliasService,
+    presetService,
+    stateService
+  ) {
     this.logger = logger.child('workspace');
     this.contextService = contextService;
+    this.contextSessionService = contextSessionService;
     this.projectResolver = projectResolver;
     this.profileService = profileService;
     this.runbookService = runbookService;
@@ -71,6 +85,18 @@ class WorkspaceService {
     this.aliasService = aliasService;
     this.presetService = presetService;
     this.stateService = stateService;
+  }
+
+  async resolveSession(args = {}) {
+    if (!this.contextSessionService) {
+      return null;
+    }
+    try {
+      return await this.contextSessionService.resolve(args);
+    } catch (error) {
+      this.logger.warn('ContextSession resolve failed', { error: error.message });
+      return null;
+    }
   }
 
   async getStoreStatus() {
@@ -222,9 +248,10 @@ class WorkspaceService {
   }
 
   async summarize(args = {}) {
-    const contextResult = await this.contextService.getContext(args);
+    const session = await this.resolveSession(args);
+    const contextResult = session ? { context: session.effective_context } : await this.contextService.getContext(args);
     const context = contextResult.context || {};
-    const projectContext = await this.resolveProjectContext(args);
+    const projectContext = session?.project_context || await this.resolveProjectContext(args);
     const store = await this.getStoreStatus();
     const inventory = await this.getInventory();
 
@@ -234,6 +261,8 @@ class WorkspaceService {
     };
     const actions = this.buildActionHints(suggestions, {
       includeCall: args.include_call !== false,
+      context,
+      projectContext,
     });
     const view = {
       format: args.format || 'full',
@@ -258,6 +287,8 @@ class WorkspaceService {
         target_info: projectContext.target || {},
       } : undefined,
       project_error: projectContext?.error,
+      diagnostics: session?.diagnostics,
+      bindings: session?.bindings,
       suggestions,
       actions,
       view,
@@ -268,6 +299,8 @@ class WorkspaceService {
         success: true,
         context: baseWorkspace.context,
         project: baseWorkspace.project,
+        diagnostics: baseWorkspace.diagnostics,
+        bindings: baseWorkspace.bindings,
         actions,
         view,
       };
@@ -291,7 +324,8 @@ class WorkspaceService {
   }
 
   async suggest(args = {}) {
-    const contextResult = await this.contextService.getContext(args);
+    const session = await this.resolveSession(args);
+    const contextResult = session ? { context: session.effective_context } : await this.contextService.getContext(args);
     const context = contextResult.context || {};
     const suggestions = {
       capabilities: await this.suggestCapabilities(context, args.limit),
@@ -299,6 +333,8 @@ class WorkspaceService {
     };
     const actions = this.buildActionHints(suggestions, {
       includeCall: args.include_call !== false,
+      context,
+      projectContext: session?.project_context,
     });
     const view = {
       format: args.format || 'suggest',
@@ -314,6 +350,8 @@ class WorkspaceService {
           root: context.root,
           tags: context.tags,
         },
+        diagnostics: session?.diagnostics,
+        bindings: session?.bindings,
         actions,
         view,
       };
@@ -325,6 +363,8 @@ class WorkspaceService {
         root: context.root,
         tags: context.tags,
       },
+      diagnostics: session?.diagnostics,
+      bindings: session?.bindings,
       suggestions,
       actions,
       view,
@@ -419,13 +459,34 @@ class WorkspaceService {
     return { success: true, store, inventory };
   }
 
-  buildActionHints(suggestions, { includeCall = true } = {}) {
+  buildActionHints(suggestions, { includeCall = true, context, projectContext } = {}) {
+    const mappingContext = {
+      context: context || {},
+      project: projectContext?.project || {},
+      target: projectContext?.target || {},
+    };
+
+    const resolveInputs = (inputsMeta) => {
+      const required = normalizeStringArray(inputsMeta?.required);
+      const defaults = inputsMeta?.defaults && typeof inputsMeta.defaults === 'object' ? inputsMeta.defaults : {};
+      const map = inputsMeta?.map && typeof inputsMeta.map === 'object' ? inputsMeta.map : {};
+      const resolved = { ...defaults };
+
+      for (const [targetKey, sourcePath] of Object.entries(map)) {
+        const value = getPathValue(mappingContext, sourcePath, { defaultValue: undefined });
+        if (value !== undefined) {
+          resolved[targetKey] = value;
+        }
+      }
+
+      const missing = required.filter((key) => resolved[key] === undefined || resolved[key] === null || resolved[key] === '');
+      return { required, defaults, map, resolved, missing };
+    };
+
     const intentActions = suggestions.capabilities.map((capability) => {
       const inputsMeta = capability.inputs || {};
-      const required = normalizeStringArray(inputsMeta.required);
-      const defaults = inputsMeta.defaults && typeof inputsMeta.defaults === 'object' ? inputsMeta.defaults : {};
-      const map = inputsMeta.map && typeof inputsMeta.map === 'object' ? inputsMeta.map : {};
-      const template = buildInputTemplate(required, defaults);
+      const { required, defaults, map, resolved, missing } = resolveInputs(inputsMeta);
+      const template = buildInputTemplate(required, { ...defaults, ...resolved });
       return {
         kind: 'intent',
         name: capability.name,
@@ -437,6 +498,8 @@ class WorkspaceService {
           required,
           defaults,
           map,
+          resolved,
+          missing,
         },
         call: includeCall ? {
           tool: 'mcp_workspace',
@@ -451,14 +514,15 @@ class WorkspaceService {
     });
 
     const runbookActions = suggestions.runbooks.map((runbook) => {
-      const required = normalizeStringArray(runbook.inputs);
-      const template = buildInputTemplate(required, {});
+      const inputsMeta = { required: runbook.inputs || [] };
+      const { required, resolved, missing } = resolveInputs(inputsMeta);
+      const template = buildInputTemplate(required, resolved);
       return {
         kind: 'runbook',
         name: runbook.name,
         description: runbook.description,
         tags: runbook.tags || [],
-        inputs: { required },
+        inputs: { required, resolved, missing },
         reason: runbook.reason,
         call: includeCall ? {
           tool: 'mcp_workspace',
