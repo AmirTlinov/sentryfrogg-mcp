@@ -125,6 +125,13 @@ class ServiceBootstrap {
         toolExecutor.aliasMap.intent = 'mcp_intent';
       }
 
+      if (this.container.has('toolExecutor') && this.container.has('workspaceManager')) {
+        const toolExecutor = this.container.get('toolExecutor');
+        const workspaceManager = this.container.get('workspaceManager');
+        toolExecutor.register('mcp_workspace', (args) => workspaceManager.handleAction(args));
+        toolExecutor.aliasMap.workspace = 'mcp_workspace';
+      }
+
       if (this.container.has('toolExecutor') && this.container.has('localManager')) {
         const toolExecutor = this.container.get('toolExecutor');
         const localManager = this.container.get('localManager');
@@ -171,6 +178,7 @@ class ServiceBootstrap {
     const PresetService = require('../services/PresetService.cjs');
     const AuditService = require('../services/AuditService.cjs');
     const CacheService = require('../services/CacheService.cjs');
+    const WorkspaceService = require('../services/WorkspaceService.cjs');
 
     // Logger (базовый сервис)
     this.container.register('logger', () => {
@@ -287,6 +295,25 @@ class ServiceBootstrap {
       singleton: true,
       dependencies: ['logger'],
     });
+
+    // Workspace сервис
+    this.container.register('workspaceService',
+      (logger, contextService, projectResolver, profileService, runbookService, capabilityService, projectService, aliasService, presetService, stateService) =>
+        new WorkspaceService(logger, contextService, projectResolver, profileService, runbookService, capabilityService, projectService, aliasService, presetService, stateService), {
+      singleton: true,
+      dependencies: [
+        'logger',
+        'contextService',
+        'projectResolver',
+        'profileService',
+        'runbookService',
+        'capabilityService',
+        'projectService',
+        'aliasService',
+        'presetService',
+        'stateService',
+      ],
+    });
   }
 
   static async registerManagers() {
@@ -307,6 +334,7 @@ class ServiceBootstrap {
     const PresetManager = require('../managers/PresetManager.cjs');
     const AuditManager = require('../managers/AuditManager.cjs');
     const PipelineManager = require('../managers/PipelineManager.cjs');
+    const WorkspaceManager = require('../managers/WorkspaceManager.cjs');
     const ToolExecutor = require('../services/ToolExecutor.cjs');
     const { isUnsafeLocalEnabled } = require('../utils/featureFlags.cjs');
 
@@ -485,6 +513,14 @@ class ServiceBootstrap {
         'projectResolver',
         'contextService',
       ],
+    });
+
+    // Workspace Manager
+    this.container.register('workspaceManager',
+      (logger, validation, workspaceService, runbookManager, intentManager) =>
+        new WorkspaceManager(logger, validation, workspaceService, runbookManager, intentManager), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'workspaceService', 'runbookManager', 'intentManager'],
     });
 
     // Alias Manager

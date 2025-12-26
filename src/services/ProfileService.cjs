@@ -5,8 +5,7 @@
  */
 
 const fs = require('fs/promises');
-const path = require('path');
-const { resolveProfileBaseDir } = require('../utils/paths.cjs');
+const { resolveProfileBaseDir, resolveProfilesPath } = require('../utils/paths.cjs');
 const { atomicWriteTextFile } = require('../utils/fsAtomic.cjs');
 
 class ProfileService {
@@ -14,7 +13,7 @@ class ProfileService {
     this.logger = logger.child('profiles');
     this.security = security;
     this.baseDir = resolveProfileBaseDir();
-    this.filePath = path.join(this.baseDir, 'profiles.json');
+    this.filePath = resolveProfilesPath();
     this.profiles = new Map();
     this.stats = {
       created: 0,

@@ -141,6 +141,48 @@ const toolCatalog = [
     },
   },
   {
+    name: 'mcp_workspace',
+    description: 'Unified workspace UX: summary, suggestions, diagnostics, and legacy store migration.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['summary', 'suggest', 'diagnose', 'store_status', 'migrate_legacy', 'run', 'stats'] },
+        key: { type: 'string' },
+        project: { type: 'string' },
+        target: { type: 'string' },
+        cwd: { type: 'string' },
+        repo_root: { type: 'string' },
+        limit: { type: 'number' },
+        include_untagged: { type: 'boolean' },
+        name: { type: 'string' },
+        runbook: { type: 'object' },
+        input: { type: 'object' },
+        inputs: { type: 'object' },
+        intent: { type: 'object' },
+        intent_type: { type: 'string' },
+        type: { type: 'string' },
+        stop_on_error: { type: 'boolean' },
+        template_missing: { type: 'string', enum: ['error', 'empty', 'null', 'undefined'] },
+        seed_state: { type: 'object' },
+        seed_state_scope: { type: 'string', enum: ['session', 'persistent', 'any'] },
+        apply: { type: 'boolean' },
+        cleanup: { type: 'boolean' },
+        overwrite: { type: 'boolean' },
+        include_dirs: { type: 'boolean' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: true,
+    },
+  },
+  {
     name: 'mcp_env',
     description: 'Encrypted env bundles + safe remote apply via SSH/SFTP.',
     inputSchema: {
@@ -649,6 +691,7 @@ toolCatalog.push(
   { name: 'state', description: 'Alias for mcp_state.', inputSchema: toolByName.mcp_state.inputSchema },
   { name: 'project', description: 'Alias for mcp_project.', inputSchema: toolByName.mcp_project.inputSchema },
   { name: 'context', description: 'Alias for mcp_context.', inputSchema: toolByName.mcp_context.inputSchema },
+  { name: 'workspace', description: 'Alias for mcp_workspace.', inputSchema: toolByName.mcp_workspace.inputSchema },
   { name: 'env', description: 'Alias for mcp_env.', inputSchema: toolByName.mcp_env.inputSchema },
   { name: 'vault', description: 'Alias for mcp_vault.', inputSchema: toolByName.mcp_vault.inputSchema },
   { name: 'runbook', description: 'Alias for mcp_runbook.', inputSchema: toolByName.mcp_runbook.inputSchema },
@@ -779,6 +822,7 @@ class SentryFroggServer {
       state: 'mcp_state',
       project: 'mcp_project',
       context: 'mcp_context',
+      workspace: 'mcp_workspace',
       env: 'mcp_env',
       vault: 'mcp_vault',
       runbook: 'mcp_runbook',
@@ -886,6 +930,19 @@ class SentryFroggServer {
         }
       }
 
+      if (toolName === 'mcp_workspace') {
+        switch (actionName) {
+          case 'summary':
+            return { action: 'summary', project: 'myapp', target: 'prod' };
+          case 'diagnose':
+            return { action: 'diagnose' };
+          case 'run':
+            return { action: 'run', intent_type: 'k8s.diff', inputs: { overlay: '/repo/overlays/prod' } };
+          default:
+            return { action: actionName };
+        }
+      }
+
       if (toolName === 'mcp_env') {
         switch (actionName) {
           case 'profile_upsert':
@@ -982,6 +1039,10 @@ class SentryFroggServer {
       mcp_context: {
         description: 'Context: обнаружение сигналов проекта и сводка контекста.',
         usage: 'summary/get → refresh → list/stats',
+      },
+      mcp_workspace: {
+        description: 'Workspace: сводка, подсказки, диагностика и перенос legacy-хранилища.',
+        usage: 'summary/suggest → run → diagnose → store_status/migrate_legacy',
       },
       mcp_env: {
         description: 'Env: зашифрованные env-бандлы и безопасная запись/запуск на серверах по SSH.',

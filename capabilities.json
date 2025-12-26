@@ -5,6 +5,7 @@
       "intent": "k8s.render",
       "description": "Render kustomize overlay via kubectl kustomize.",
       "runbook": "k8s.render",
+      "tags": ["k8s", "gitops"],
       "inputs": {
         "required": ["overlay", "kubeconfig"],
         "defaults": {},
@@ -20,6 +21,7 @@
       "intent": "k8s.diff",
       "description": "Render and diff against cluster.",
       "runbook": "k8s.diff",
+      "tags": ["k8s", "gitops", "read"],
       "inputs": {
         "required": ["overlay", "kubeconfig"],
         "defaults": {},
@@ -35,6 +37,7 @@
       "intent": "k8s.apply",
       "description": "Render and apply to cluster.",
       "runbook": "k8s.apply",
+      "tags": ["k8s", "gitops", "write"],
       "inputs": {
         "required": ["overlay", "kubeconfig"],
         "defaults": {},
@@ -50,6 +53,7 @@
       "intent": "ssh.health",
       "description": "Quick SSH reachability check.",
       "runbook": "ssh.health",
+      "tags": ["ssh", "read"],
       "inputs": {
         "required": [],
         "defaults": {}
@@ -60,6 +64,7 @@
       "intent": "api.check",
       "description": "API health check.",
       "runbook": "api.check",
+      "tags": ["api", "read"],
       "inputs": {
         "required": ["path"],
         "defaults": { "path": "/health" },

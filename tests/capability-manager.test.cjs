@@ -90,6 +90,5 @@ test('CapabilityManager suggests capabilities by context tags', async (t) => {
   });
 
   const suggestion = await manager.handleAction({ action: 'suggest' });
-  assert.equal(suggestion.suggestions.length, 1);
-  assert.equal(suggestion.suggestions[0].name, 'k8s.diff');
+  assert.ok(suggestion.suggestions.some((item) => item.name === 'k8s.diff'));
 });

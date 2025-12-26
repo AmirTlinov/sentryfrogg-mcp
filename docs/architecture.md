@@ -15,6 +15,12 @@ SentryFrogg is a stdio-based MCP server built around a small service layer that 
   - `src/managers/SSHManager.cjs`
   - `src/managers/APIManager.cjs`
   - `src/managers/StateManager.cjs`
+  - `src/managers/ProjectManager.cjs`
+  - `src/managers/ContextManager.cjs`
+  - `src/managers/CapabilityManager.cjs`
+  - `src/managers/IntentManager.cjs`
+  - `src/managers/EvidenceManager.cjs`
+  - `src/managers/WorkspaceManager.cjs`
   - `src/managers/RunbookManager.cjs`
   - `src/managers/AliasManager.cjs`
   - `src/managers/PresetManager.cjs`
@@ -26,6 +32,11 @@ SentryFrogg is a stdio-based MCP server built around a small service layer that 
   - `src/services/Validation.cjs` — canonical input validation
   - `src/services/Logger.cjs` — minimal logger (stderr)
   - `src/services/StateService.cjs` — persistent/session state
+  - `src/services/ProjectService.cjs` — project registry
+  - `src/services/ContextService.cjs` — context detection
+  - `src/services/CapabilityService.cjs` — capability registry
+  - `src/services/EvidenceService.cjs` — evidence bundles
+  - `src/services/WorkspaceService.cjs` — workspace summary/diagnostics
   - `src/services/RunbookService.cjs` — runbook storage
   - `src/services/AliasService.cjs` — alias storage
   - `src/services/PresetService.cjs` — preset storage
@@ -37,13 +48,19 @@ SentryFrogg is a stdio-based MCP server built around a small service layer that 
 
 Local state (base directory):
 - Default: `${XDG_STATE_HOME}/sentryfrogg` or `~/.local/state/sentryfrogg`.
-- Compatibility: if legacy store files exist next to the entry file, that directory is used.
+- Legacy store usage is opt-in via `MCP_LEGACY_STORE=1`.
+
+Bundles:
+- Default `runbooks.json` / `capabilities.json` live in the repository and are safe to ship.
+- Local overrides live in the base directory via `MCP_RUNBOOKS_PATH` / `MCP_CAPABILITIES_PATH`.
 
 Store files:
 - `profiles.json` — profile store (data + encrypted secrets)
 - `.mcp_profiles.key` — persistent encryption key (created with `0600`)
 - `state.json` — persistent state values (session state remains in memory)
 - `projects.json` — project registry (targets → profile bindings)
+- `context.json` — project context cache
+- `capabilities.json` — capability registry
 - `runbooks.json` — runbook definitions
 - `aliases.json` — alias registry
 - `presets.json` — preset registry
@@ -70,14 +87,19 @@ Encryption:
 
 Environment variables:
 - `MCP_PROFILES_DIR` — directory for `profiles.json`
+- `MCP_PROFILES_PATH` — explicit path to `profiles.json`
 - `MCP_PROFILE_KEY_PATH` — explicit path to `.mcp_profiles.key`
 - `MCP_STATE_PATH` — explicit path to `state.json`
 - `MCP_PROJECTS_PATH` — explicit path to `projects.json`
 - `MCP_RUNBOOKS_PATH` — explicit path to `runbooks.json`
+- `MCP_DEFAULT_RUNBOOKS_PATH` — explicit path to default runbooks bundle
+- `MCP_CAPABILITIES_PATH` — explicit path to `capabilities.json`
+- `MCP_DEFAULT_CAPABILITIES_PATH` — explicit path to default capabilities bundle
 - `MCP_ALIASES_PATH` — explicit path to `aliases.json`
 - `MCP_PRESETS_PATH` — explicit path to `presets.json`
 - `MCP_AUDIT_PATH` — explicit path to `audit.jsonl`
 - `MCP_CACHE_DIR` — directory for cache files
+- `MCP_LEGACY_STORE` — set to `1` to use legacy store next to entrypoint
 - `ENCRYPTION_KEY` — supply a stable encryption key (recommended for shared environments)
 - `LOG_LEVEL` — `error` / `warn` / `info` / `debug`
 - `SENTRYFROGG_UNSAFE_LOCAL` / `SF_UNSAFE_LOCAL` — enable `mcp_local` (local exec + filesystem). Disabled by default.

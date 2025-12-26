@@ -81,6 +81,7 @@ Export Postgres to SFTP:
 - `mcp_runbook`
 - `mcp_project`
 - `mcp_context`
+- `mcp_workspace`
 - `mcp_capability`
 - `mcp_intent`
 - `mcp_evidence`
@@ -90,7 +91,7 @@ Export Postgres to SFTP:
 - `mcp_pipeline`
 - `mcp_local` (unsafe, opt-in)
 
-Short aliases are also available (`sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `pipeline`; plus `local` when unsafe mode is enabled).
+Short aliases are also available (`sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `workspace`, `pipeline`; plus `local` when unsafe mode is enabled).
 
 Reference + examples: `docs/tools.md`.
 

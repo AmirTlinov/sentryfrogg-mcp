@@ -30,14 +30,16 @@ By default, SentryFrogg stores local state in an OS-friendly location:
 - `~/.local/state/sentryfrogg` (HOME fallback).
 
 Compatibility note:
-- If legacy store files already exist next to the entry file, SentryFrogg will keep using that directory (no implicit migration).
+- Legacy store usage is **opt-in** via `MCP_LEGACY_STORE=1`. Default storage stays in the XDG state directory.
 
 Store files:
 - `profiles.json` (encrypted profile store)
 - `.mcp_profiles.key` (persistent encryption key, created with `0600` permissions)
 - `state.json` (persistent state store)
 - `projects.json` (project registry)
+- `context.json` (project context cache)
 - `runbooks.json` (runbook definitions)
+- `capabilities.json` (capability registry)
 - `aliases.json` (alias registry)
 - `presets.json` (preset registry)
 - `audit.jsonl` (audit log)
@@ -45,20 +47,27 @@ Store files:
 
 Recommended environment variables:
 - `MCP_PROFILES_DIR`: directory for `profiles.json` (keep it **outside** the repository)
+- `MCP_PROFILES_PATH`: explicit path to `profiles.json`
 - `MCP_PROFILE_KEY_PATH`: explicit path to `.mcp_profiles.key`
 - `MCP_STATE_PATH`: explicit path to `state.json`
 - `MCP_PROJECTS_PATH`: explicit path to `projects.json`
 - `MCP_RUNBOOKS_PATH`: explicit path to `runbooks.json`
+- `MCP_DEFAULT_RUNBOOKS_PATH`: explicit path to default runbooks bundle
+- `MCP_CAPABILITIES_PATH`: explicit path to `capabilities.json`
+- `MCP_DEFAULT_CAPABILITIES_PATH`: explicit path to default capabilities bundle
+- `MCP_CONTEXT_PATH`: explicit path to `context.json`
 - `MCP_ALIASES_PATH`: explicit path to `aliases.json`
 - `MCP_PRESETS_PATH`: explicit path to `presets.json`
 - `MCP_AUDIT_PATH`: explicit path to `audit.jsonl`
 - `MCP_CACHE_DIR`: directory for cache files
+- `MCP_LEGACY_STORE`: set to `1` to use legacy store next to the entrypoint
 - `ENCRYPTION_KEY`: provide a stable key (recommended for shared/team environments)
   - accepted formats: **64 hex chars** (32 bytes) / **32 raw chars** / base64 (decoded as bytes)
 - `LOG_LEVEL`: server logging level (`error`, `warn`, `info`, `debug`); logs are written to **stderr** to keep MCP stdout clean
 
 Important:
-- Never commit `profiles.json`, `state.json`, `runbooks.json`, `aliases.json`, `presets.json`, `audit.jsonl`, `cache/`, or `.mcp_profiles.key` to git.
+- Never commit local state (`profiles.json`, `state.json`, `projects.json`, `context.json`, `aliases.json`, `presets.json`, `audit.jsonl`, `cache/`, `.mcp_profiles.key`) to git.
+- Default capability/runbook bundles are safe to ship in the repository; local overrides should live outside the repo via `MCP_RUNBOOKS_PATH` / `MCP_CAPABILITIES_PATH`.
 - If these files were ever committed in history: rotate credentials, change `ENCRYPTION_KEY`, and purge git history (e.g., `git filter-repo` / BFG) before making the repository public.
 - Profile format is **not** backward-compatible with pre-5.0 releases. Recreate profiles if upgrading.
 

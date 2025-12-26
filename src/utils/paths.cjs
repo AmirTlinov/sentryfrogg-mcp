@@ -4,6 +4,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const LEGACY_ENV_FLAG = 'MCP_LEGACY_STORE';
+
 function resolveHomeDir() {
   try {
     const home = os.homedir();
@@ -47,15 +49,35 @@ function hasLegacyStore(dirPath) {
   return candidates.some((name) => fs.existsSync(path.join(dirPath, name)));
 }
 
+function resolveEntryDir() {
+  const entryCandidate = process.argv[1] || require.main?.filename;
+  if (!entryCandidate) {
+    return null;
+  }
+  return path.dirname(entryCandidate);
+}
+
+function resolveLegacyBaseDir() {
+  const entryDir = resolveEntryDir();
+  if (entryDir && hasLegacyStore(entryDir)) {
+    return entryDir;
+  }
+  return null;
+}
+
+function isLegacyMode() {
+  const flag = String(process.env[LEGACY_ENV_FLAG] || '').trim().toLowerCase();
+  return flag === '1' || flag === 'true' || flag === 'yes';
+}
+
 function resolveProfileBaseDir() {
   if (process.env.MCP_PROFILES_DIR) {
     return path.resolve(process.env.MCP_PROFILES_DIR);
   }
 
-  const entryCandidate = process.argv[1] || require.main?.filename;
-  if (entryCandidate) {
-    const legacyDir = path.dirname(entryCandidate);
-    if (hasLegacyStore(legacyDir)) {
+  if (isLegacyMode()) {
+    const legacyDir = resolveLegacyBaseDir();
+    if (legacyDir) {
       return legacyDir;
     }
   }
@@ -65,7 +87,13 @@ function resolveProfileBaseDir() {
     return path.join(xdgStateDir, 'sentryfrogg');
   }
 
-  return entryCandidate ? path.dirname(entryCandidate) : process.cwd();
+  const legacyDir = resolveLegacyBaseDir();
+  if (legacyDir) {
+    return legacyDir;
+  }
+
+  const entryDir = resolveEntryDir();
+  return entryDir || process.cwd();
 }
 
 function resolveProfileKeyPath() {
@@ -79,6 +107,36 @@ function resolveProfileKeyPath() {
 module.exports = {
   resolveProfileBaseDir,
   resolveProfileKeyPath,
+  resolveEntryDir,
+  resolveLegacyBaseDir,
+  isLegacyMode,
+  resolveStoreMode() {
+    if (process.env.MCP_PROFILES_DIR) {
+      return 'custom';
+    }
+    if (isLegacyMode() && resolveLegacyBaseDir()) {
+      return 'legacy';
+    }
+    const xdgStateDir = resolveXdgStateDir();
+    if (xdgStateDir) {
+      return 'xdg';
+    }
+    return resolveLegacyBaseDir() ? 'legacy' : 'fallback';
+  },
+  resolveStoreInfo() {
+    return {
+      base_dir: resolveProfileBaseDir(),
+      legacy_dir: resolveLegacyBaseDir(),
+      entry_dir: resolveEntryDir(),
+      mode: module.exports.resolveStoreMode(),
+    };
+  },
+  resolveProfilesPath() {
+    if (process.env.MCP_PROFILES_PATH) {
+      return path.resolve(process.env.MCP_PROFILES_PATH);
+    }
+    return path.join(resolveProfileBaseDir(), 'profiles.json');
+  },
   resolveStatePath() {
     if (process.env.MCP_STATE_PATH) {
       return path.resolve(process.env.MCP_STATE_PATH);
@@ -97,11 +155,23 @@ module.exports = {
     }
     return path.join(resolveProfileBaseDir(), 'runbooks.json');
   },
+  resolveDefaultRunbooksPath() {
+    if (process.env.MCP_DEFAULT_RUNBOOKS_PATH) {
+      return path.resolve(process.env.MCP_DEFAULT_RUNBOOKS_PATH);
+    }
+    return path.join(__dirname, '..', '..', 'runbooks.json');
+  },
   resolveCapabilitiesPath() {
     if (process.env.MCP_CAPABILITIES_PATH) {
       return path.resolve(process.env.MCP_CAPABILITIES_PATH);
     }
     return path.join(resolveProfileBaseDir(), 'capabilities.json');
+  },
+  resolveDefaultCapabilitiesPath() {
+    if (process.env.MCP_DEFAULT_CAPABILITIES_PATH) {
+      return path.resolve(process.env.MCP_DEFAULT_CAPABILITIES_PATH);
+    }
+    return path.join(__dirname, '..', '..', 'capabilities.json');
   },
   resolveContextPath() {
     if (process.env.MCP_CONTEXT_PATH) {

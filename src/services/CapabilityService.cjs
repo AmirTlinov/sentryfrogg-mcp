@@ -5,7 +5,7 @@
  */
 
 const fs = require('fs/promises');
-const { resolveCapabilitiesPath } = require('../utils/paths.cjs');
+const { resolveCapabilitiesPath, resolveDefaultCapabilitiesPath } = require('../utils/paths.cjs');
 const { atomicWriteTextFile } = require('../utils/fsAtomic.cjs');
 
 class CapabilityService {
@@ -13,9 +13,13 @@ class CapabilityService {
     this.logger = logger.child('capabilities');
     this.security = security;
     this.filePath = resolveCapabilitiesPath();
+    this.defaultPath = resolveDefaultCapabilitiesPath();
     this.capabilities = new Map();
+    this.sources = new Map();
     this.stats = {
       loaded: 0,
+      loaded_default: 0,
+      loaded_local: 0,
       created: 0,
       updated: 0,
       saved: 0,
@@ -34,30 +38,45 @@ class CapabilityService {
   }
 
   async loadCapabilities() {
+    await this.loadFromPath(this.defaultPath, 'default');
+    await this.loadFromPath(this.filePath, 'local');
+    this.stats.loaded = this.capabilities.size;
+  }
+
+  async loadFromPath(filePath, source) {
+    if (!filePath) {
+      return;
+    }
     try {
-      const raw = await fs.readFile(this.filePath, 'utf8');
+      const raw = await fs.readFile(filePath, 'utf8');
       const parsed = JSON.parse(raw);
       const rawCapabilities = parsed.capabilities ?? parsed;
+      let count = 0;
       if (Array.isArray(rawCapabilities)) {
         for (const entry of rawCapabilities) {
           if (entry && entry.name) {
             this.capabilities.set(entry.name, entry);
+            this.sources.set(entry.name, source);
+            count += 1;
           }
         }
       } else {
         for (const [name, entry] of Object.entries(rawCapabilities || {})) {
           this.capabilities.set(name, { ...entry, name });
+          this.sources.set(name, source);
+          count += 1;
         }
       }
-      this.stats.loaded = this.capabilities.size;
-      this.logger.info('Capabilities loaded', { count: this.capabilities.size });
+      if (count > 0) {
+        this.stats[`loaded_${source}`] += count;
+        this.logger.info('Capabilities loaded', { count, source });
+      }
     } catch (error) {
       if (error.code === 'ENOENT') {
-        this.logger.info('capabilities.json not found, starting clean');
         return;
       }
       this.stats.errors += 1;
-      this.logger.error('Failed to load capabilities', { error: error.message });
+      this.logger.error('Failed to load capabilities', { error: error.message, source });
       throw error;
     }
   }
@@ -83,6 +102,7 @@ class CapabilityService {
       depends_on: capability.depends_on || [],
       tags: capability.tags || [],
       when: capability.when,
+      source: this.sources.get(capability.name) || 'local',
     }));
   }
 
@@ -137,6 +157,7 @@ class CapabilityService {
     };
 
     this.capabilities.set(trimmedName, next);
+    this.sources.set(trimmedName, 'local');
     await this.persist();
     if (existing.created_at) {
       this.stats.updated += 1;

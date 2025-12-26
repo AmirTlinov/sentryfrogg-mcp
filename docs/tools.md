@@ -176,6 +176,56 @@ Notes:
 - Context is stored in `context.json` under the profiles directory (`MCP_CONTEXT_PATH` overrides).
 - Context only contains safe metadata (paths + detected tags), not secrets.
 
+## `mcp_workspace`
+
+Unified workspace UX: one-call summary, suggestions, and diagnostics.
+
+Key actions:
+- `summary` / `suggest` / `diagnose`
+- `run` (execute runbook by name)
+- `store_status` / `migrate_legacy`
+- `stats`
+
+Summary example:
+
+```json
+{ "action": "summary", "project": "myapp", "target": "prod" }
+```
+
+Diagnostics example:
+
+```json
+{ "action": "diagnose" }
+```
+
+Run example:
+
+```json
+{ "action": "run", "name": "k8s.diff", "input": { "overlay": "/repo/overlays/prod", "kubeconfig": "/path/kubeconfig" } }
+```
+
+Intent example (dry-run by default):
+
+```json
+{ "action": "run", "intent_type": "k8s.diff", "inputs": { "overlay": "/repo/overlays/prod" } }
+```
+
+Intent apply (write/mixed):
+
+```json
+{ "action": "run", "intent_type": "k8s.apply", "inputs": { "overlay": "/repo/overlays/prod" }, "apply": true }
+```
+
+Legacy migration (dry-run by default):
+
+```json
+{ "action": "migrate_legacy" }
+```
+
+Notes:
+- Suggestions are derived from context tags and available runbooks/capabilities.
+- `migrate_legacy` accepts `apply`, `cleanup`, `include_dirs`, `overwrite` flags.
+
 ## `mcp_capability`
 
 Capability registry ties intents to runbooks (with optional `when` filters).

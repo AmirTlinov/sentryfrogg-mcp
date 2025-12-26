@@ -43,8 +43,9 @@ test('CapabilityService persists and resolves intents', async (t) => {
   });
 
   const list = await service.listCapabilities();
-  assert.equal(list.length, 1);
-  assert.equal(list[0].name, 'demo.read');
+  const entry = list.find((item) => item.name === 'demo.read');
+  assert.ok(entry);
+  assert.equal(entry.source, 'local');
 
   const resolved = await service.findByIntent('demo.read');
   assert.equal(resolved.runbook, 'demo.run');

@@ -67,13 +67,19 @@ SentryFrogg — MCP-сервер (stdio), который даёт LLM-агент
 - `mcp_api_client`
 - `mcp_state`
 - `mcp_runbook`
+- `mcp_project`
+- `mcp_context`
+- `mcp_workspace`
+- `mcp_capability`
+- `mcp_intent`
+- `mcp_evidence`
 - `mcp_alias`
 - `mcp_preset`
 - `mcp_audit`
 - `mcp_pipeline`
 - `mcp_local` (unsafe, опционально)
 
-Короткие алиасы: `sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `pipeline` (и `local`, если включён unsafe режим).
+Короткие алиасы: `sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `workspace`, `pipeline` (и `local`, если включён unsafe режим).
 
 Примеры и паттерны вызовов: `docs/tools.md`.
 
