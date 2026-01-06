@@ -24,6 +24,7 @@ const crypto = require('crypto');
 const fsSync = require('fs');
 const fs = require('fs/promises');
 const path = require('path');
+const Ajv = require('ajv');
 
 const ServiceBootstrap = require('./src/bootstrap/ServiceBootstrap.cjs');
 const { isUnsafeLocalEnabled } = require('./src/utils/featureFlags.cjs');
@@ -130,7 +131,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -156,7 +157,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -168,7 +169,10 @@ const toolCatalog = [
         action: { type: 'string', enum: ['get', 'refresh', 'summary', 'list', 'stats'] },
         key: { type: 'string' },
         project: { type: 'string' },
+        project_name: { type: 'string' },
         target: { type: 'string' },
+        project_target: { type: 'string' },
+        environment: { type: 'string' },
         cwd: { type: 'string' },
         repo_root: { type: 'string' },
         refresh: { type: 'boolean' },
@@ -182,7 +186,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -194,7 +198,10 @@ const toolCatalog = [
         action: { type: 'string', enum: ['summary', 'suggest', 'diagnose', 'store_status', 'migrate_legacy', 'run', 'cleanup', 'stats'] },
         key: { type: 'string' },
         project: { type: 'string' },
+        project_name: { type: 'string' },
         target: { type: 'string' },
+        project_target: { type: 'string' },
+        environment: { type: 'string' },
         cwd: { type: 'string' },
         repo_root: { type: 'string' },
         limit: { type: 'number' },
@@ -224,7 +231,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -243,7 +250,10 @@ const toolCatalog = [
         secrets: { type: ['object', 'null'] },
 
         project: { type: 'string' },
+        project_name: { type: 'string' },
         target: { type: 'string' },
+        project_target: { type: 'string' },
+        environment: { type: 'string' },
         ssh_profile_name: { type: 'string' },
         ssh_profile: { type: 'string' },
         env_profile: { type: 'string' },
@@ -272,7 +282,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -301,7 +311,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -330,7 +340,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -344,7 +354,10 @@ const toolCatalog = [
         intent: { type: 'string' },
         capability: { type: 'object' },
         project: { type: 'string' },
+        project_name: { type: 'string' },
         target: { type: 'string' },
+        project_target: { type: 'string' },
+        environment: { type: 'string' },
         cwd: { type: 'string' },
         repo_root: { type: 'string' },
         output: outputSchema,
@@ -357,7 +370,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -370,7 +383,10 @@ const toolCatalog = [
         intent: { type: 'object' },
         apply: { type: 'boolean' },
         project: { type: 'string' },
+        project_name: { type: 'string' },
         target: { type: 'string' },
+        project_target: { type: 'string' },
+        environment: { type: 'string' },
         cwd: { type: 'string' },
         repo_root: { type: 'string' },
         context_key: { type: 'string' },
@@ -388,7 +404,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -410,7 +426,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -434,7 +450,7 @@ const toolCatalog = [
         parent_span_id: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -455,7 +471,7 @@ const toolCatalog = [
         parent_span_id: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -481,7 +497,7 @@ const toolCatalog = [
         parent_span_id: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -493,7 +509,10 @@ const toolCatalog = [
 	        action: { type: 'string', enum: ['run', 'describe'] },
 	        flow: { type: 'string', enum: ['http_to_sftp', 'sftp_to_http', 'http_to_postgres', 'sftp_to_postgres', 'postgres_to_sftp', 'postgres_to_http'] },
 	        project: { type: 'string' },
+	        project_name: { type: 'string' },
 	        target: { type: 'string' },
+	        project_target: { type: 'string' },
+	        environment: { type: 'string' },
 	        vault_profile_name: { type: 'string' },
 	        vault_profile: { type: 'string' },
 	        http: { type: 'object' },
@@ -525,7 +544,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -536,7 +555,10 @@ const toolCatalog = [
       properties: {
         action: { type: 'string', enum: ['repo_info', 'assert_clean', 'git_diff', 'render', 'apply_patch', 'git_commit', 'git_revert', 'git_push', 'exec'] },
         project: { type: 'string' },
+        project_name: { type: 'string' },
         target: { type: 'string' },
+        project_target: { type: 'string' },
+        environment: { type: 'string' },
         repo_root: { type: 'string' },
         cwd: { type: 'string' },
         apply: { type: 'boolean' },
@@ -576,7 +598,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   },
   {
@@ -591,7 +613,10 @@ const toolCatalog = [
 	        connection: { type: 'object' },
 	        connection_url: { type: 'string' },
 	        project: { type: 'string' },
+	        project_name: { type: 'string' },
 	        target: { type: 'string' },
+	        project_target: { type: 'string' },
+	        environment: { type: 'string' },
 	        vault_profile_name: { type: 'string' },
 	        vault_profile: { type: 'string' },
 	        pool: { type: 'object' },
@@ -630,7 +655,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true
+      additionalProperties: false
     }
   },
   {
@@ -639,12 +664,15 @@ const toolCatalog = [
 	    inputSchema: {
 	      type: 'object',
 	      properties: {
-	        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test', 'authorized_keys_add', 'exec', 'exec_detached', 'batch', 'system_info', 'check_host', 'sftp_list', 'sftp_upload', 'sftp_download'] },
+	        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test', 'authorized_keys_add', 'exec', 'exec_detached', 'job_status', 'job_wait', 'job_logs_tail', 'job_kill', 'job_forget', 'batch', 'system_info', 'check_host', 'sftp_list', 'sftp_exists', 'sftp_upload', 'sftp_download'] },
 	        profile_name: { type: 'string' },
 	        include_secrets: { type: 'boolean' },
 	        connection: { type: 'object' },
 	        project: { type: 'string' },
+	        project_name: { type: 'string' },
 	        target: { type: 'string' },
+	        project_target: { type: 'string' },
+	        environment: { type: 'string' },
 	        vault_profile_name: { type: 'string' },
 	        vault_profile: { type: 'string' },
 	        host_key_policy: { type: 'string', enum: ['accept', 'tofu', 'pin'] },
@@ -656,8 +684,14 @@ const toolCatalog = [
         cwd: { type: 'string' },
         env: { type: 'object' },
 	        stdin: { type: 'string' },
+	        job_id: { type: 'string' },
+	        pid: { type: 'integer' },
 	        log_path: { type: 'string' },
 	        pid_path: { type: 'string' },
+	        exit_path: { type: 'string' },
+	        signal: { type: 'string' },
+        lines: { type: 'integer' },
+        poll_interval_ms: { type: 'integer' },
         timeout_ms: { type: 'integer' },
         pty: { type: ['boolean', 'object'] },
         commands: { type: 'array', items: { type: 'object' } },
@@ -681,7 +715,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true
+      additionalProperties: false
     }
   },
   {
@@ -694,7 +728,10 @@ const toolCatalog = [
 	        profile_name: { type: 'string' },
 	        include_secrets: { type: 'boolean' },
 	        project: { type: 'string' },
+	        project_name: { type: 'string' },
 	        target: { type: 'string' },
+	        project_target: { type: 'string' },
+	        environment: { type: 'string' },
 	        vault_profile_name: { type: 'string' },
 	        vault_profile: { type: 'string' },
 	        base_url: { type: 'string' },
@@ -728,7 +765,7 @@ const toolCatalog = [
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true
+      additionalProperties: false
     }
   }
 ];
@@ -774,7 +811,7 @@ if (isUnsafeLocalEnabled()) {
         preset_name: { type: 'string' },
       },
       required: ['action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
   });
 }
@@ -805,6 +842,50 @@ toolCatalog.push(
 
 if (toolByName.mcp_local) {
   toolCatalog.push({ name: 'local', description: 'Alias for mcp_local.', inputSchema: toolByName.mcp_local.inputSchema });
+}
+
+const ajv = new Ajv({ allErrors: true, strict: false });
+const validatorByTool = new Map();
+
+function formatSchemaErrors(errors) {
+  if (!Array.isArray(errors) || errors.length === 0) {
+    return 'Invalid arguments';
+  }
+
+  const rendered = errors.slice(0, 8).map((err) => {
+    const at = err.instancePath ? err.instancePath : '(root)';
+    if (err.keyword === 'additionalProperties' && err.params && err.params.additionalProperty) {
+      return `${at}: unknown field '${err.params.additionalProperty}'`;
+    }
+    if (err.keyword === 'type' && err.params && err.params.type) {
+      return `${at}: expected ${err.params.type}`;
+    }
+    return `${at}: ${err.message || err.keyword}`;
+  });
+
+  return errors.length > rendered.length
+    ? `${rendered.join('; ')} (+${errors.length - rendered.length} more)`
+    : rendered.join('; ');
+}
+
+function assertToolArgsValid(toolName, args) {
+  const canonical = HELP_TOOL_ALIASES[toolName] || toolName;
+  const tool = toolByName[canonical];
+  if (!tool || !tool.inputSchema) {
+    return;
+  }
+
+  const payload = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+
+  let validate = validatorByTool.get(canonical);
+  if (!validate) {
+    validate = ajv.compile(tool.inputSchema);
+    validatorByTool.set(canonical, validate);
+  }
+
+  if (!validate(payload)) {
+    throw new McpError(ErrorCode.InvalidParams, formatSchemaErrors(validate.errors));
+  }
 }
 
 function normalizeJsonSchemaForOpenAI(schema) {
@@ -1346,6 +1427,7 @@ class SentryFroggServer {
       const toolExecutor = this.container.get('toolExecutor');
 
       try {
+        assertToolArgsValid(name, args);
         let result;
         let payload;
         const startedAt = Date.now();

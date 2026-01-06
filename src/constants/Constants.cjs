@@ -8,6 +8,11 @@ class Constants {
       POSTGRES_DEFAULT_PORT: 5432,
       SSH_DEFAULT_PORT: 22,
       TIMEOUT_SSH_READY: 10000,       // 10 секунд
+      // NOTE: MCP tool calls are often subject to an external ~60s deadline.
+      // Keep any single tool execution below this budget unless explicitly detached.
+      TIMEOUT_MCP_TOOL_CALL: 55000,   // 55 секунд
+      TIMEOUT_SSH_EXEC_DEFAULT: 45000, // 45 секунд
+      TIMEOUT_SSH_DETACHED_START: 20000, // 20 секунд (start-only wrapper)
       TIMEOUT_API_REQUEST: 30000,     // 30 секунд
       TIMEOUT_MUTEX: 30000,           // 30 секунд
       TIMEOUT_CONNECTION: 5000,       // 5 секунд

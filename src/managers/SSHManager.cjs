@@ -64,6 +64,21 @@ function escapeShellValue(value) {
   return `'${str.replace(/'/g, "'\\''")}'`;
 }
 
+function readPositiveInt(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return Math.floor(numeric);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function normalizePublicKeyLine(raw) {
   const normalized = String(raw ?? '').replace(/\r/g, '');
   const lines = normalized
@@ -122,11 +137,14 @@ class SSHManager {
     this.secretRefResolver = secretRefResolver;
     this.connections = new Map();
     this.connecting = new Map();
+    this.jobs = new Map();
+    this.maxJobs = readPositiveInt(process.env.SENTRYFROGG_SSH_MAX_JOBS || process.env.SF_SSH_MAX_JOBS) || 200;
     this.stats = {
       commands: 0,
       profiles_created: 0,
       errors: 0,
       sftp_ops: 0,
+      jobs_created: 0,
     };
   }
 
@@ -150,6 +168,16 @@ class SSHManager {
         return this.execCommand(args);
       case 'exec_detached':
         return this.execDetached(args);
+      case 'job_status':
+        return this.jobStatus(args);
+      case 'job_wait':
+        return this.jobWait(args);
+      case 'job_logs_tail':
+        return this.jobLogsTail(args);
+      case 'job_kill':
+        return this.jobKill(args);
+      case 'job_forget':
+        return this.jobForget(args);
       case 'batch':
         return this.batch(args);
       case 'system_info':
@@ -158,6 +186,8 @@ class SSHManager {
         return this.checkHost(args);
       case 'sftp_list':
         return this.sftpList(args);
+      case 'sftp_exists':
+        return this.sftpExists(args);
       case 'sftp_upload':
         return this.sftpUpload(args);
       case 'sftp_download':
@@ -712,6 +742,36 @@ class SSHManager {
     }
   }
 
+  resolveToolCallBudgetMs() {
+    const fromEnv = readPositiveInt(process.env.SENTRYFROGG_TOOL_CALL_TIMEOUT_MS || process.env.SF_TOOL_CALL_TIMEOUT_MS);
+    return fromEnv ?? Constants.NETWORK.TIMEOUT_MCP_TOOL_CALL;
+  }
+
+  resolveExecDefaultTimeoutMs() {
+    const fromEnv = readPositiveInt(process.env.SENTRYFROGG_SSH_EXEC_TIMEOUT_MS || process.env.SF_SSH_EXEC_TIMEOUT_MS);
+    return fromEnv ?? Constants.NETWORK.TIMEOUT_SSH_EXEC_DEFAULT;
+  }
+
+  resolveDetachedStartTimeoutMs() {
+    const fromEnv = readPositiveInt(process.env.SENTRYFROGG_SSH_DETACHED_START_TIMEOUT_MS || process.env.SF_SSH_DETACHED_START_TIMEOUT_MS);
+    return fromEnv ?? Constants.NETWORK.TIMEOUT_SSH_DETACHED_START;
+  }
+
+  registerJob(job) {
+    if (!job || typeof job !== 'object' || !job.job_id) {
+      return;
+    }
+    this.jobs.set(job.job_id, job);
+    while (this.jobs.size > this.maxJobs) {
+      const oldest = this.jobs.keys().next().value;
+      if (!oldest) {
+        break;
+      }
+      this.jobs.delete(oldest);
+    }
+    this.stats.jobs_created += 1;
+  }
+
   buildCommand(command, cwd) {
     const trimmed = this.security.cleanCommand(command);
     if (cwd) {
@@ -724,6 +784,26 @@ class SSHManager {
     const { connection, profileName } = await this.resolveConnection(args);
     const command = this.buildCommand(args.command, args.cwd);
 
+    const budgetMs = this.resolveToolCallBudgetMs();
+    const requestedTimeoutMs = readPositiveInt(args.timeout_ms);
+    if (requestedTimeoutMs && requestedTimeoutMs > budgetMs) {
+      const started = await this.execDetached({
+        ...args,
+        timeout_ms: this.resolveDetachedStartTimeoutMs(),
+      });
+      return {
+        ...started,
+        detached: true,
+        requested_timeout_ms: requestedTimeoutMs,
+      };
+    }
+
+    const effectiveTimeoutMs = Math.min(
+      requestedTimeoutMs ?? this.resolveExecDefaultTimeoutMs(),
+      budgetMs
+    );
+    const execArgs = { ...args, timeout_ms: effectiveTimeoutMs };
+
     const options = {
       env: args.env,
       pty: args.pty,
@@ -731,11 +811,17 @@ class SSHManager {
 
     try {
       const result = profileName
-        ? await this.withClientRetry(profileName, args, (client) => this.exec(client, command, options, args))
-        : await this.execOnce(connection, command, options, args);
+        ? await this.withClientRetry(profileName, execArgs, (client) => this.exec(client, command, options, execArgs))
+        : await this.execOnce(connection, command, options, execArgs);
 
       this.stats.commands += 1;
-      return { success: result.exitCode === 0, command, ...result };
+      return {
+        success: result.exitCode === 0 && result.timedOut !== true,
+        command,
+        timeout_ms: effectiveTimeoutMs,
+        requested_timeout_ms: requestedTimeoutMs,
+        ...result,
+      };
     } catch (error) {
       this.stats.errors += 1;
       this.logger.error('SSH command failed', { profile: profileName, error: error.message });
@@ -754,29 +840,67 @@ class SSHManager {
       ? this.validation.ensureString(args.pid_path, 'pid_path', { trim: false })
       : `${logPath}.pid`;
 
-    const detachedCommand = `nohup sh -lc ${escapeShellValue(command)} > ${escapeShellValue(logPath)} 2>&1 < /dev/null & echo $! > ${escapeShellValue(pidPath)}; cat ${escapeShellValue(pidPath)}`;
+    const exitPath = args.exit_path !== undefined
+      ? this.validation.ensureString(args.exit_path, 'exit_path', { trim: false })
+      : `${logPath}.exit`;
+
+    const jobId = crypto.randomUUID();
+
+    const inner = [
+      `(${command})`,
+      'rc=$?',
+      `echo "$rc" > ${escapeShellValue(exitPath)}`,
+      'exit "$rc"',
+    ].join('\n');
+
+    const detachedCommand = [
+      `rm -f ${escapeShellValue(pidPath)} ${escapeShellValue(exitPath)} 2>/dev/null || true`,
+      `nohup sh -lc ${escapeShellValue(inner)} > ${escapeShellValue(logPath)} 2>&1 < /dev/null & echo $! > ${escapeShellValue(pidPath)}`,
+      `cat ${escapeShellValue(pidPath)}`,
+    ].join('; ');
 
     const options = {
       env: args.env,
       pty: false,
     };
 
+    const execArgs = {
+      ...args,
+      timeout_ms: Math.min(
+        readPositiveInt(args.timeout_ms) ?? this.resolveDetachedStartTimeoutMs(),
+        this.resolveToolCallBudgetMs()
+      ),
+    };
+
     try {
       const result = profileName
-        ? await this.withClientRetry(profileName, args, (client) => this.exec(client, detachedCommand, options, args))
-        : await this.execOnce(connection, detachedCommand, options, args);
+        ? await this.withClientRetry(profileName, execArgs, (client) => this.exec(client, detachedCommand, options, execArgs))
+        : await this.execOnce(connection, detachedCommand, options, execArgs);
 
       const match = String(result.stdout || '').match(/(\d+)\s*$/);
       const pid = match ? Number(match[1]) : null;
 
+      this.registerJob({
+        job_id: jobId,
+        created_at: new Date().toISOString(),
+        profile_name: profileName || null,
+        pid,
+        log_path: logPath,
+        pid_path: pidPath,
+        exit_path: exitPath,
+      });
+
       this.stats.commands += 1;
       return {
         success: result.exitCode === 0 && Number.isInteger(pid),
+        job_id: jobId,
         command,
         detached_command: detachedCommand,
         pid,
         log_path: logPath,
         pid_path: pidPath,
+        exit_path: exitPath,
+        start_timeout_ms: execArgs.timeout_ms,
         ...result,
       };
     } catch (error) {
@@ -797,7 +921,7 @@ class SSHManager {
   }
 
   exec(client, command, options = {}, args = {}) {
-    const timeoutMs = args.timeout_ms;
+    const timeoutMs = readPositiveInt(args.timeout_ms);
     const stdin = args.stdin;
 
     return new Promise((resolve, reject) => {
@@ -805,6 +929,7 @@ class SSHManager {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let settled = false;
 
       client.exec(command, options, (error, stream) => {
         if (error) {
@@ -812,12 +937,39 @@ class SSHManager {
           return;
         }
 
+        const finalize = (fn) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          fn();
+        };
+
         let timeout;
+        let hardTimeout;
         if (timeoutMs) {
           timeout = setTimeout(() => {
             timedOut = true;
-            stream.close();
+            try {
+              stream.close();
+            } catch (closeError) {
+              // ignore
+            }
           }, timeoutMs);
+
+          hardTimeout = setTimeout(() => {
+            timedOut = true;
+            try {
+              stream.close();
+            } catch (closeError) {
+              // ignore
+            }
+            try {
+              stream.destroy();
+            } catch (destroyError) {
+              // ignore
+            }
+          }, timeoutMs + 2000);
         }
 
         stream
@@ -825,16 +977,29 @@ class SSHManager {
             if (timeout) {
               clearTimeout(timeout);
             }
-            resolve({
-              stdout: stdout.trim(),
-              stderr: stderr.trim(),
-              exitCode: code,
-              signal,
-              timedOut,
-              duration_ms: Date.now() - started,
+            if (hardTimeout) {
+              clearTimeout(hardTimeout);
+            }
+            finalize(() => {
+              resolve({
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                exitCode: code,
+                signal,
+                timedOut,
+                duration_ms: Date.now() - started,
+              });
             });
           })
-          .on('error', reject)
+          .on('error', (streamError) => {
+            if (timeout) {
+              clearTimeout(timeout);
+            }
+            if (hardTimeout) {
+              clearTimeout(hardTimeout);
+            }
+            finalize(() => reject(streamError));
+          })
           .on('data', (data) => {
             stdout += data.toString();
           });
@@ -848,6 +1013,227 @@ class SSHManager {
         }
       });
     });
+  }
+
+  resolveJobSpec(args = {}, { requirePid = true } = {}) {
+    const jobId = args.job_id !== undefined && args.job_id !== null
+      ? this.validation.ensureString(args.job_id, 'job_id')
+      : null;
+
+    const fromRegistry = jobId ? this.jobs.get(jobId) : null;
+    if (jobId && !fromRegistry) {
+      throw new Error(`Unknown job_id: ${jobId}`);
+    }
+
+    const logPathRaw = args.log_path ?? fromRegistry?.log_path;
+    const logPath = logPathRaw !== undefined && logPathRaw !== null
+      ? this.validation.ensureString(logPathRaw, 'log_path', { trim: false })
+      : undefined;
+
+    const pidPathRaw = args.pid_path ?? fromRegistry?.pid_path ?? (logPath ? `${logPath}.pid` : undefined);
+    const pidPath = pidPathRaw !== undefined && pidPathRaw !== null
+      ? this.validation.ensureString(pidPathRaw, 'pid_path', { trim: false })
+      : undefined;
+
+    const exitPathRaw = args.exit_path ?? fromRegistry?.exit_path ?? (logPath ? `${logPath}.exit` : undefined);
+    const exitPath = exitPathRaw !== undefined && exitPathRaw !== null
+      ? this.validation.ensureString(exitPathRaw, 'exit_path', { trim: false })
+      : undefined;
+
+    const pidRaw = args.pid ?? fromRegistry?.pid;
+    const pid = pidRaw === undefined || pidRaw === null || pidRaw === '' ? null : Number(pidRaw);
+    if (pid !== null && (!Number.isFinite(pid) || !Number.isInteger(pid) || pid <= 0)) {
+      throw new Error('pid must be a positive integer');
+    }
+
+    if (requirePid && !pid && !pidPath) {
+      throw new Error('job requires pid or pid_path (or job_id with known pid_path)');
+    }
+
+    return {
+      job_id: jobId,
+      profile_name: fromRegistry?.profile_name ?? null,
+      pid,
+      pid_path: pidPath,
+      log_path: logPath,
+      exit_path: exitPath,
+    };
+  }
+
+  async jobStatus(args = {}) {
+    const job = this.resolveJobSpec(args);
+    const budgetMs = this.resolveToolCallBudgetMs();
+    const timeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 10000, budgetMs);
+
+    const pidValue = job.pid ? String(job.pid) : '';
+    const pidPath = job.pid_path ? String(job.pid_path) : '';
+    const exitPath = job.exit_path ? String(job.exit_path) : '';
+    const logPath = job.log_path ? String(job.log_path) : '';
+
+    const script = [
+      'set -u',
+      `PID_VALUE=${escapeShellValue(pidValue)}`,
+      `PID_PATH=${escapeShellValue(pidPath)}`,
+      `EXIT_PATH=${escapeShellValue(exitPath)}`,
+      `LOG_PATH=${escapeShellValue(logPath)}`,
+      'pid="$PID_VALUE"',
+      'if [ -z "$pid" ] && [ -n "$PID_PATH" ] && [ -f "$PID_PATH" ]; then pid="$(cat "$PID_PATH" 2>/dev/null | tr -dc \'0-9\' | head -c 32)"; fi',
+      'running=0',
+      'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then running=1; fi',
+      'exit_code=""',
+      'if [ -n "$EXIT_PATH" ] && [ -f "$EXIT_PATH" ]; then exit_code="$(cat "$EXIT_PATH" 2>/dev/null | tr -d "\\r\\n" | head -c 64)"; fi',
+      'log_bytes=""',
+      'if [ -n "$LOG_PATH" ] && [ -f "$LOG_PATH" ]; then log_bytes="$(wc -c < "$LOG_PATH" 2>/dev/null | tr -d " ")"; fi',
+      'echo "__SF_PID__=$pid"',
+      'echo "__SF_RUNNING__=$running"',
+      'echo "__SF_EXIT_CODE__=$exit_code"',
+      'echo "__SF_LOG_BYTES__=$log_bytes"',
+    ].join('\n');
+
+    const exec = await this.execCommand({
+      ...args,
+      cwd: undefined,
+      pty: false,
+      timeout_ms: timeoutMs,
+      command: script,
+    });
+
+    const lines = String(exec.stdout || '').split(/\n/);
+    const pick = (prefix) => {
+      const line = lines.find((item) => item.startsWith(prefix));
+      return line ? line.slice(prefix.length) : '';
+    };
+
+    const pidStr = pick('__SF_PID__=');
+    const runningStr = pick('__SF_RUNNING__=');
+    const exitStr = pick('__SF_EXIT_CODE__=');
+    const logBytesStr = pick('__SF_LOG_BYTES__=');
+
+    const resolvedPid = pidStr ? Number(pidStr) : null;
+    const running = runningStr === '1';
+    const exitCode = exitStr === '' ? null : Number(exitStr);
+    const exited = exitStr !== '' && Number.isFinite(exitCode);
+    const logBytes = logBytesStr === '' ? null : Number(logBytesStr);
+
+    return {
+      success: true,
+      job_id: job.job_id,
+      pid: Number.isInteger(resolvedPid) ? resolvedPid : job.pid,
+      running,
+      exited,
+      exit_code: exited ? exitCode : null,
+      log_path: job.log_path,
+      pid_path: job.pid_path,
+      exit_path: job.exit_path,
+      log_bytes: Number.isFinite(logBytes) ? logBytes : null,
+    };
+  }
+
+  async jobWait(args = {}) {
+    const budgetMs = this.resolveToolCallBudgetMs();
+    const requested = readPositiveInt(args.timeout_ms) ?? 30000;
+    const timeoutMs = Math.min(requested, budgetMs);
+    const pollMs = Math.min(readPositiveInt(args.poll_interval_ms) ?? 1000, 5000);
+    const started = Date.now();
+
+    let status = await this.jobStatus({ ...args, timeout_ms: Math.min(10000, budgetMs) });
+    while (!status.exited && Date.now() - started + pollMs <= timeoutMs) {
+      await sleep(pollMs);
+      status = await this.jobStatus({ ...args, timeout_ms: Math.min(10000, budgetMs) });
+    }
+
+    const waitedMs = Date.now() - started;
+    return {
+      success: true,
+      completed: status.exited,
+      timed_out: !status.exited,
+      waited_ms: waitedMs,
+      timeout_ms: timeoutMs,
+      poll_interval_ms: pollMs,
+      status,
+    };
+  }
+
+  async jobLogsTail(args = {}) {
+    const spec = this.resolveJobSpec(args, { requirePid: false });
+    const logPath = spec.log_path;
+    if (!logPath) {
+      throw new Error('log_path is required (or job_id with known log_path)');
+    }
+
+    const lines = Math.min(readPositiveInt(args.lines) ?? 200, 2000);
+    const budgetMs = this.resolveToolCallBudgetMs();
+    const timeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 10000, budgetMs);
+
+    const cmd = `tail -n ${lines} ${escapeShellValue(logPath)} 2>/dev/null || true`;
+    const out = await this.execCommand({
+      ...args,
+      cwd: undefined,
+      pty: false,
+      timeout_ms: timeoutMs,
+      command: cmd,
+    });
+
+    return {
+      success: true,
+      job_id: spec.job_id,
+      log_path: logPath,
+      lines,
+      text: out.stdout || '',
+    };
+  }
+
+  async jobKill(args = {}) {
+    const job = this.resolveJobSpec(args);
+    const budgetMs = this.resolveToolCallBudgetMs();
+    const timeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 10000, budgetMs);
+
+    const rawSignal = args.signal === undefined || args.signal === null ? 'TERM' : String(args.signal).trim();
+    if (!/^[A-Za-z0-9]+$/.test(rawSignal)) {
+      throw new Error('signal must be an alphanumeric string (e.g. TERM, KILL, 9)');
+    }
+    const signal = rawSignal.toUpperCase();
+
+    const pidValue = job.pid ? String(job.pid) : '';
+    const pidPath = job.pid_path ? String(job.pid_path) : '';
+
+    const script = [
+      'set -u',
+      `PID_VALUE=${escapeShellValue(pidValue)}`,
+      `PID_PATH=${escapeShellValue(pidPath)}`,
+      `SIG=${escapeShellValue(signal)}`,
+      'pid="$PID_VALUE"',
+      'if [ -z "$pid" ] && [ -n "$PID_PATH" ] && [ -f "$PID_PATH" ]; then pid="$(cat "$PID_PATH" 2>/dev/null | tr -dc \'0-9\' | head -c 32)"; fi',
+      'if [ -z "$pid" ]; then echo "__SF_KILL__=no_pid"; exit 2; fi',
+      'kill -s "$SIG" "$pid" 2>/dev/null || kill "$pid" 2>/dev/null',
+      'echo "__SF_KILL__=ok"',
+    ].join('\n');
+
+    const exec = await this.execCommand({
+      ...args,
+      cwd: undefined,
+      pty: false,
+      timeout_ms: timeoutMs,
+      command: script,
+    });
+
+    if (exec.exitCode !== 0) {
+      throw new Error(exec.stderr || `job_kill failed (exitCode=${exec.exitCode})`);
+    }
+
+    return {
+      success: true,
+      job_id: job.job_id,
+      pid: job.pid,
+      pid_path: job.pid_path,
+      signal,
+    };
+  }
+
+  async jobForget(args = {}) {
+    const jobId = this.validation.ensureString(args.job_id, 'job_id');
+    const existed = this.jobs.delete(jobId);
+    return { success: true, job_id: jobId, removed: existed };
   }
 
   async batch(args) {
@@ -930,6 +1316,68 @@ class SSHManager {
 
     this.stats.sftp_ops += 1;
     return { success: true, path: remotePath, entries };
+  }
+
+  async sftpExists(args) {
+    const remotePath = this.validation.ensureString(args.remote_path ?? args.path, 'remote_path');
+    const timeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 10000, this.resolveToolCallBudgetMs());
+
+    let exists = false;
+    let stat = null;
+
+    await this.withSftp(args, async (sftp) => {
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          reject(new Error('sftp_exists timeout'));
+        }, timeoutMs);
+
+        sftp.stat(remotePath, (error, attrs) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timeout);
+
+          if (!error) {
+            exists = true;
+            stat = attrs
+              ? {
+                size: attrs.size,
+                mode: attrs.mode,
+                uid: attrs.uid,
+                gid: attrs.gid,
+                atime: attrs.atime,
+                mtime: attrs.mtime,
+              }
+              : null;
+            resolve();
+            return;
+          }
+
+          if (error.code === 2) {
+            exists = false;
+            stat = null;
+            resolve();
+            return;
+          }
+
+          reject(error);
+        });
+      });
+    });
+
+    this.stats.sftp_ops += 1;
+    return {
+      success: true,
+      remote_path: remotePath,
+      exists,
+      stat,
+    };
   }
 
   async sftpUpload(args) {
@@ -1071,7 +1519,7 @@ class SSHManager {
   }
 
   getStats() {
-    return { ...this.stats, active_connections: this.connections.size };
+    return { ...this.stats, active_connections: this.connections.size, active_jobs: this.jobs.size };
   }
 
   async cleanup() {
