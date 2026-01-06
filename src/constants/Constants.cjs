@@ -12,6 +12,7 @@ class Constants {
       // Keep any single tool execution below this budget unless explicitly detached.
       TIMEOUT_MCP_TOOL_CALL: 55000,   // 55 секунд
       TIMEOUT_SSH_EXEC_DEFAULT: 45000, // 45 секунд
+      TIMEOUT_SSH_EXEC_HARD_GRACE: 2000, // 2 секунды (force-settle timeout)
       TIMEOUT_SSH_DETACHED_START: 20000, // 20 секунд (start-only wrapper)
       TIMEOUT_API_REQUEST: 30000,     // 30 секунд
       TIMEOUT_MUTEX: 30000,           // 30 секунд

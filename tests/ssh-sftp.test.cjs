@@ -131,12 +131,16 @@ test('sftpDownload expands ~ in local_path', async () => {
     manager.withSftp = async (_args, handler) => handler({
       fastGet(_remote, local, cb) {
         capturedLocal = local;
-        cb(null);
+        fs.writeFile(local, 'downloaded')
+          .then(() => cb(null))
+          .catch((error) => cb(error));
       },
     });
 
     await manager.sftpDownload({ remote_path: '/remote/file.txt', local_path: '~/file.txt', overwrite: true, mkdirs: true });
-    assert.equal(capturedLocal, path.join(tmpDir, 'file.txt'));
+    const expected = path.join(tmpDir, 'file.txt');
+    assert.ok(capturedLocal.startsWith(`${expected}.sentryfrogg.tmp-`));
+    assert.equal(await fs.readFile(expected, 'utf8'), 'downloaded');
   } finally {
     if (previousHome === undefined) {
       delete process.env.HOME;
@@ -144,4 +148,46 @@ test('sftpDownload expands ~ in local_path', async () => {
       process.env.HOME = previousHome;
     }
   }
+});
+
+test('sftpDownload returns success=false when remote is missing and cleans tmp file', async () => {
+  const manager = new SSHManager(loggerStub, securityStub, validationStub, profileServiceStub());
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-sftp-missing-'));
+  const localPath = path.join(tmpDir, 'file.txt');
+
+  let capturedTmp = null;
+  manager.withSftp = async (_args, handler) => handler({
+    fastGet(_remote, local, cb) {
+      capturedTmp = local;
+      fs.writeFile(local, 'partial')
+        .then(() => cb({ code: 2, message: 'No such file' }))
+        .catch((error) => cb(error));
+    },
+  });
+
+  const result = await manager.sftpDownload({ remote_path: '/remote/missing.txt', local_path: localPath, overwrite: true, mkdirs: true });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'ENOENT');
+  await assert.rejects(() => fs.access(localPath), /ENOENT/);
+  assert.ok(capturedTmp);
+  await assert.rejects(() => fs.access(capturedTmp), /ENOENT/);
+});
+
+test('sftpDownload remote missing keeps existing local file when overwrite=true', async () => {
+  const manager = new SSHManager(loggerStub, securityStub, validationStub, profileServiceStub());
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-sftp-missing-existing-'));
+  const localPath = path.join(tmpDir, 'file.txt');
+  await fs.writeFile(localPath, 'exists');
+
+  manager.withSftp = async (_args, handler) => handler({
+    fastGet(_remote, _local, cb) {
+      cb({ code: 2, message: 'No such file' });
+    },
+  });
+
+  const result = await manager.sftpDownload({ remote_path: '/remote/missing.txt', local_path: localPath, overwrite: true });
+  assert.equal(result.success, false);
+  assert.equal(await fs.readFile(localPath, 'utf8'), 'exists');
 });

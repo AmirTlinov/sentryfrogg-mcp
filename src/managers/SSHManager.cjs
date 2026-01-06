@@ -752,6 +752,11 @@ class SSHManager {
     return fromEnv ?? Constants.NETWORK.TIMEOUT_SSH_EXEC_DEFAULT;
   }
 
+  resolveExecHardGraceMs() {
+    const fromEnv = readPositiveInt(process.env.SENTRYFROGG_SSH_EXEC_HARD_GRACE_MS || process.env.SF_SSH_EXEC_HARD_GRACE_MS);
+    return fromEnv ?? Constants.NETWORK.TIMEOUT_SSH_EXEC_HARD_GRACE;
+  }
+
   resolveDetachedStartTimeoutMs() {
     const fromEnv = readPositiveInt(process.env.SENTRYFROGG_SSH_DETACHED_START_TIMEOUT_MS || process.env.SF_SSH_DETACHED_START_TIMEOUT_MS);
     return fromEnv ?? Constants.NETWORK.TIMEOUT_SSH_DETACHED_START;
@@ -921,8 +926,14 @@ class SSHManager {
   }
 
   exec(client, command, options = {}, args = {}) {
-    const timeoutMs = readPositiveInt(args.timeout_ms);
+    const requestedTimeoutMs = readPositiveInt(args.timeout_ms);
     const stdin = args.stdin;
+
+    const budgetMs = this.resolveToolCallBudgetMs();
+    const timeoutMs = requestedTimeoutMs ? Math.min(requestedTimeoutMs, budgetMs) : null;
+    const hardGraceMs = timeoutMs
+      ? Math.min(this.resolveExecHardGraceMs(), Math.max(0, budgetMs - timeoutMs))
+      : 0;
 
     return new Promise((resolve, reject) => {
       const started = Date.now();
@@ -959,6 +970,9 @@ class SSHManager {
 
           hardTimeout = setTimeout(() => {
             timedOut = true;
+            if (timeout) {
+              clearTimeout(timeout);
+            }
             try {
               stream.close();
             } catch (closeError) {
@@ -969,7 +983,24 @@ class SSHManager {
             } catch (destroyError) {
               // ignore
             }
-          }, timeoutMs + 2000);
+            try {
+              client.destroy();
+            } catch (clientError) {
+              // ignore
+            }
+
+            finalize(() => {
+              resolve({
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                exitCode: null,
+                signal: null,
+                timedOut: true,
+                hardTimedOut: true,
+                duration_ms: Date.now() - started,
+              });
+            });
+          }, timeoutMs + hardGraceMs);
         }
 
         stream
@@ -1438,6 +1469,7 @@ class SSHManager {
     const remotePath = this.validation.ensureString(args.remote_path, 'remote_path');
     const localPath = expandHomePath(this.validation.ensureString(args.local_path, 'local_path'));
     const overwrite = args.overwrite === true;
+    const tmpPath = `${localPath}.sentryfrogg.tmp-${crypto.randomBytes(4).toString('hex')}`;
 
     if (!overwrite) {
       try {
@@ -1454,31 +1486,72 @@ class SSHManager {
       await fs.mkdir(path.dirname(localPath), { recursive: true });
     }
 
-    await this.withSftp(args, async (sftp) => {
-      await new Promise((resolve, reject) => {
-        sftp.fastGet(remotePath, localPath, (error) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve();
-          }
-        });
-      });
+    let remoteTimes = null;
+    try {
+      await this.withSftp(args, async (sftp) => {
+        if (args.preserve_mtime) {
+          remoteTimes = await new Promise((resolve, reject) => {
+            sftp.stat(remotePath, (error, stat) => {
+              if (error) {
+                reject(error);
+              } else {
+                resolve(stat);
+              }
+            });
+          });
+        }
 
-      if (args.preserve_mtime) {
         await new Promise((resolve, reject) => {
-          sftp.stat(remotePath, (error, stat) => {
+          sftp.fastGet(remotePath, tmpPath, (error) => {
             if (error) {
               reject(error);
             } else {
-              fs.utimes(localPath, stat.atime, stat.mtime)
-                .then(resolve)
-                .catch(reject);
+              resolve();
             }
           });
         });
+      });
+    } catch (error) {
+      await fs.rm(tmpPath, { force: true }).catch(() => null);
+
+      if (error && (error.code === 2 || error.code === 'ENOENT')) {
+        this.stats.sftp_ops += 1;
+        return {
+          success: false,
+          remote_path: remotePath,
+          local_path: localPath,
+          code: 'ENOENT',
+          error: error.message || 'Remote path does not exist',
+        };
       }
-    });
+
+      throw error;
+    }
+
+    if (remoteTimes && typeof remoteTimes === 'object') {
+      await fs.utimes(tmpPath, remoteTimes.atime, remoteTimes.mtime).catch(() => null);
+    }
+
+    const localExists = await fs.access(localPath).then(() => true).catch(() => false);
+    let backupPath = null;
+    if (overwrite && localExists) {
+      backupPath = `${localPath}.sentryfrogg.bak-${crypto.randomBytes(4).toString('hex')}`;
+      await fs.rename(localPath, backupPath);
+    }
+
+    try {
+      await fs.rename(tmpPath, localPath);
+    } catch (error) {
+      await fs.rm(tmpPath, { force: true }).catch(() => null);
+      if (backupPath) {
+        await fs.rename(backupPath, localPath).catch(() => null);
+      }
+      throw error;
+    }
+
+    if (backupPath) {
+      await fs.rm(backupPath, { force: true }).catch(() => null);
+    }
 
     this.stats.sftp_ops += 1;
     return { success: true, remote_path: remotePath, local_path: localPath };
