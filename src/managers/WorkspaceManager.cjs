@@ -5,12 +5,13 @@
  */
 
 class WorkspaceManager {
-  constructor(logger, validation, workspaceService, runbookManager, intentManager) {
+  constructor(logger, validation, workspaceService, runbookManager, intentManager, sshManager) {
     this.logger = logger.child('workspace');
     this.validation = validation;
     this.workspaceService = workspaceService;
     this.runbookManager = runbookManager;
     this.intentManager = intentManager;
+    this.sshManager = sshManager;
   }
 
   async handleAction(args = {}) {
@@ -28,11 +29,29 @@ class WorkspaceManager {
         return this.workspaceService.migrateLegacy(args);
       case 'run':
         return this.run(args);
+      case 'cleanup':
+        return this.cleanup(args);
       case 'stats':
         return this.workspaceService.getStats();
       default:
         throw new Error(`Unknown workspace action: ${action}`);
     }
+  }
+
+  async cleanup() {
+    const results = {};
+
+    if (this.runbookManager?.cleanup) {
+      await this.runbookManager.cleanup();
+      results.runbook = { success: true };
+    }
+
+    if (this.sshManager?.cleanup) {
+      await this.sshManager.cleanup();
+      results.ssh = { success: true };
+    }
+
+    return { success: true, cleaned: Object.keys(results), results };
   }
 
   normalizeArgs(args) {

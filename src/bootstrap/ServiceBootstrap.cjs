@@ -559,10 +559,10 @@ class ServiceBootstrap {
 
     // Workspace Manager
     this.container.register('workspaceManager',
-      (logger, validation, workspaceService, runbookManager, intentManager) =>
-        new WorkspaceManager(logger, validation, workspaceService, runbookManager, intentManager), {
+      (logger, validation, workspaceService, runbookManager, intentManager, sshManager) =>
+        new WorkspaceManager(logger, validation, workspaceService, runbookManager, intentManager, sshManager), {
       singleton: true,
-      dependencies: ['logger', 'validation', 'workspaceService', 'runbookManager', 'intentManager'],
+      dependencies: ['logger', 'validation', 'workspaceService', 'runbookManager', 'intentManager', 'sshManager'],
     });
 
     // Alias Manager

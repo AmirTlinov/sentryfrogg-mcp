@@ -107,6 +107,11 @@ function fingerprintPublicKeySha256(line) {
   return `SHA256:${hash.replace(/=+$/, '')}`;
 }
 
+function isChannelOpenFailure(error) {
+  const message = error && error.message !== undefined ? String(error.message) : String(error ?? '');
+  return message.toLowerCase().includes('channel open failure');
+}
+
 class SSHManager {
   constructor(logger, security, validation, profileService, projectResolver, secretRefResolver) {
     this.logger = logger.child('ssh');
@@ -143,6 +148,8 @@ class SSHManager {
         return this.authorizedKeysAdd(args);
       case 'exec':
         return this.execCommand(args);
+      case 'exec_detached':
+        return this.execDetached(args);
       case 'batch':
         return this.batch(args);
       case 'system_info':
@@ -520,6 +527,51 @@ class SSHManager {
     }
   }
 
+  async resetProfileConnection(profileName, reason) {
+    const key = profileKey(profileName);
+    const entry = this.connections.get(key);
+    this.connecting.delete(key);
+
+    if (entry) {
+      try {
+        entry.closed = true;
+      } catch (error) {
+        // ignore
+      }
+      this.connections.delete(key);
+      try {
+        entry.client?.end?.();
+      } catch (error) {
+        // ignore
+      }
+      try {
+        entry.client?.destroy?.();
+      } catch (error) {
+        // ignore
+      }
+    }
+
+    this.logger.warn('Reset SSH connection', { profile: profileName, reason });
+    return { success: true, reset: Boolean(entry) };
+  }
+
+  async withClientRetry(profileName, args, handler) {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.withClient(profileName, args, handler);
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0 && isChannelOpenFailure(error)) {
+          await this.resetProfileConnection(profileName, error.message);
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw lastError;
+  }
+
   mergeProfile(profile) {
     const connection = { ...(profile.data || {}) };
     const secrets = { ...(profile.secrets || {}) };
@@ -610,7 +662,7 @@ class SSHManager {
   async withSftp(args, handler) {
     const { connection, profileName } = await this.resolveConnection(args);
     if (profileName) {
-      return this.withClient(profileName, args, async (client) => {
+      return this.withClientRetry(profileName, args, async (client) => {
         const sftp = await this.getSftp(client);
         return handler(sftp);
       });
@@ -679,7 +731,7 @@ class SSHManager {
 
     try {
       const result = profileName
-        ? await this.withClient(profileName, args, (client) => this.exec(client, command, options, args))
+        ? await this.withClientRetry(profileName, args, (client) => this.exec(client, command, options, args))
         : await this.execOnce(connection, command, options, args);
 
       this.stats.commands += 1;
@@ -687,6 +739,49 @@ class SSHManager {
     } catch (error) {
       this.stats.errors += 1;
       this.logger.error('SSH command failed', { profile: profileName, error: error.message });
+      throw error;
+    }
+  }
+
+  async execDetached(args) {
+    const { connection, profileName } = await this.resolveConnection(args);
+    const command = this.buildCommand(args.command, args.cwd);
+
+    const logPath = args.log_path !== undefined
+      ? this.validation.ensureString(args.log_path, 'log_path', { trim: false })
+      : `/tmp/sentryfrogg-detached-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.log`;
+    const pidPath = args.pid_path !== undefined
+      ? this.validation.ensureString(args.pid_path, 'pid_path', { trim: false })
+      : `${logPath}.pid`;
+
+    const detachedCommand = `nohup sh -lc ${escapeShellValue(command)} > ${escapeShellValue(logPath)} 2>&1 < /dev/null & echo $! > ${escapeShellValue(pidPath)}; cat ${escapeShellValue(pidPath)}`;
+
+    const options = {
+      env: args.env,
+      pty: false,
+    };
+
+    try {
+      const result = profileName
+        ? await this.withClientRetry(profileName, args, (client) => this.exec(client, detachedCommand, options, args))
+        : await this.execOnce(connection, detachedCommand, options, args);
+
+      const match = String(result.stdout || '').match(/(\d+)\s*$/);
+      const pid = match ? Number(match[1]) : null;
+
+      this.stats.commands += 1;
+      return {
+        success: result.exitCode === 0 && Number.isInteger(pid),
+        command,
+        detached_command: detachedCommand,
+        pid,
+        log_path: logPath,
+        pid_path: pidPath,
+        ...result,
+      };
+    } catch (error) {
+      this.stats.errors += 1;
+      this.logger.error('SSH detached command failed', { profile: profileName, error: error.message });
       throw error;
     }
   }

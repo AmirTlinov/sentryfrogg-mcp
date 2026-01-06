@@ -191,7 +191,7 @@ const toolCatalog = [
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['summary', 'suggest', 'diagnose', 'store_status', 'migrate_legacy', 'run', 'stats'] },
+        action: { type: 'string', enum: ['summary', 'suggest', 'diagnose', 'store_status', 'migrate_legacy', 'run', 'cleanup', 'stats'] },
         key: { type: 'string' },
         project: { type: 'string' },
         target: { type: 'string' },
@@ -639,7 +639,7 @@ const toolCatalog = [
 	    inputSchema: {
 	      type: 'object',
 	      properties: {
-	        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test', 'authorized_keys_add', 'exec', 'batch', 'system_info', 'check_host', 'sftp_list', 'sftp_upload', 'sftp_download'] },
+	        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test', 'authorized_keys_add', 'exec', 'exec_detached', 'batch', 'system_info', 'check_host', 'sftp_list', 'sftp_upload', 'sftp_download'] },
 	        profile_name: { type: 'string' },
 	        include_secrets: { type: 'boolean' },
 	        connection: { type: 'object' },
@@ -655,7 +655,9 @@ const toolCatalog = [
 	        command: { type: 'string' },
         cwd: { type: 'string' },
         env: { type: 'object' },
-        stdin: { type: 'string' },
+	        stdin: { type: 'string' },
+	        log_path: { type: 'string' },
+	        pid_path: { type: 'string' },
         timeout_ms: { type: 'integer' },
         pty: { type: ['boolean', 'object'] },
         commands: { type: 'array', items: { type: 'object' } },
@@ -1681,6 +1683,13 @@ class SentryFroggServer {
               target: 'prod',
               command: 'uname -a',
             };
+          case 'exec_detached':
+            return {
+              action: 'exec_detached',
+              target: 'prod',
+              command: 'sleep 60 && echo done',
+              log_path: '/tmp/sentryfrogg-detached.log',
+            };
           default:
             return { action: actionName };
         }
@@ -1732,6 +1741,8 @@ class SentryFroggServer {
             return { action: 'diagnose' };
           case 'run':
             return { action: 'run', intent_type: 'k8s.diff', inputs: { overlay: '/repo/overlays/prod' } };
+          case 'cleanup':
+            return { action: 'cleanup' };
           default:
             return { action: actionName };
         }
@@ -1841,7 +1852,7 @@ class SentryFroggServer {
       },
       mcp_ssh_manager: {
         description: 'SSH: профили, exec/batch, диагностика и SFTP.',
-        usage: "profile_upsert/profile_list → (optional) authorized_keys_add → exec/batch/system_info/check_host/sftp_*",
+        usage: "profile_upsert/profile_list → (optional) authorized_keys_add → exec/exec_detached/batch/system_info/check_host/sftp_*",
       },
       mcp_api_client: {
         description: 'HTTP: профили, request/paginate/download, retry/backoff, auth providers + cache.',
@@ -1865,7 +1876,7 @@ class SentryFroggServer {
       },
       mcp_workspace: {
         description: 'Workspace: сводка, подсказки, диагностика и перенос legacy-хранилища.',
-        usage: 'summary/suggest → run → diagnose → store_status/migrate_legacy',
+        usage: 'summary/suggest → run → cleanup → diagnose → store_status/migrate_legacy',
       },
       mcp_env: {
         description: 'Env: зашифрованные env-бандлы и безопасная запись/запуск на серверах по SSH.',
