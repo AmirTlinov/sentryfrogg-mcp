@@ -1226,8 +1226,7 @@ async function writeContextArtifact(contextRoot, artifact, content) {
 }
 
 function formatGenericResultToContext({ tool, action, result, meta, artifactUri, artifactWriteError }) {
-  const lines = buildContextHeaderLegend();
-  lines.push('[DATA]');
+  const lines = ['[DATA]'];
 
   const header = action ? `${tool}.${action}` : tool;
   lines.push(`A: ${header}`);
