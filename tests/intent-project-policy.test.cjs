@@ -1,10 +1,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs/promises');
-const path = require('path');
-const os = require('os');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+
 const CapabilityService = require('../src/services/CapabilityService.cjs');
 const EvidenceService = require('../src/services/EvidenceService.cjs');
+const StateService = require('../src/services/StateService.cjs');
+const PolicyService = require('../src/services/PolicyService.cjs');
 const IntentManager = require('../src/managers/IntentManager.cjs');
 
 const loggerStub = {
@@ -31,7 +34,7 @@ const validationStub = {
     if (value === undefined || value === null) {
       return undefined;
     }
-    return this.ensureString(value, label);
+    return this.ensureString(String(value), label);
   },
   ensureObject(value, label) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -47,12 +50,14 @@ const validationStub = {
   },
 };
 
-test('IntentManager compiles and enforces apply for write effects', async (t) => {
-  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-intent-'));
+test('IntentManager resolves target.policy and target.* mappings even when project/target are provided', async (t) => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sentryfrogg-intent-policy-'));
   const previousCapabilities = process.env.MCP_CAPABILITIES_PATH;
   const previousEvidence = process.env.MCP_EVIDENCE_DIR;
+  const previousState = process.env.MCP_STATE_PATH;
   process.env.MCP_CAPABILITIES_PATH = path.join(tmpRoot, 'capabilities.json');
   process.env.MCP_EVIDENCE_DIR = path.join(tmpRoot, 'evidence');
+  process.env.MCP_STATE_PATH = path.join(tmpRoot, 'state.json');
 
   t.after(async () => {
     if (previousCapabilities === undefined) {
@@ -65,33 +70,56 @@ test('IntentManager compiles and enforces apply for write effects', async (t) =>
     } else {
       process.env.MCP_EVIDENCE_DIR = previousEvidence;
     }
+    if (previousState === undefined) {
+      delete process.env.MCP_STATE_PATH;
+    } else {
+      process.env.MCP_STATE_PATH = previousState;
+    }
     await fs.rm(tmpRoot, { recursive: true, force: true });
   });
 
   const capabilityService = new CapabilityService(loggerStub, securityStub);
   await capabilityService.initialize();
-  await capabilityService.setCapability('k8s.apply', {
-    intent: 'k8s.apply',
-    runbook: 'k8s.apply',
-    inputs: { required: ['overlay'] },
+  await capabilityService.setCapability('gitops.propose', {
+    intent: 'gitops.propose',
+    runbook: 'noop',
+    when: null,
+    inputs: {
+      required: ['patch', 'message', 'kubeconfig'],
+      map: {
+        kubeconfig: 'target.kubeconfig',
+      },
+    },
     effects: { kind: 'write', requires_apply: true },
   });
 
   const runbookManagerStub = {
-    handleAction: async (args) => ({
-      success: true,
-      runbook: args.name,
-      steps: [],
-    }),
+    handleAction: async () => ({ success: true, steps: [] }),
   };
 
-  const contextServiceStub = {
-    async getContext() {
-      return { context: { key: 'demo', root: tmpRoot, tags: ['k8s'] } };
+  let resolverCalls = 0;
+  const projectResolverStub = {
+    async resolveContext(args) {
+      resolverCalls += 1;
+      assert.equal(args.project, 'demo');
+      assert.equal(args.target, 'prod');
+      return {
+        projectName: 'demo',
+        targetName: 'prod',
+        project: {},
+        target: {
+          kubeconfig: '/tmp/kubeconfig',
+          policy: { mode: 'operatorless', lock: { enabled: false } },
+        },
+      };
     },
   };
 
+  const stateService = new StateService(loggerStub);
+  await stateService.initialize();
+  const policyService = new PolicyService(loggerStub, validationStub, stateService);
   const evidenceService = new EvidenceService(loggerStub, securityStub);
+
   const intentManager = new IntentManager(
     loggerStub,
     securityStub,
@@ -99,31 +127,26 @@ test('IntentManager compiles and enforces apply for write effects', async (t) =>
     capabilityService,
     runbookManagerStub,
     evidenceService,
+    projectResolverStub,
     null,
-    contextServiceStub
-  );
-
-  const compiled = await intentManager.handleAction({
-    action: 'compile',
-    intent: { type: 'k8s.apply', inputs: { overlay: '/repo/overlay' } },
-  });
-  assert.equal(compiled.plan.steps.length, 1);
-
-  await assert.rejects(
-    () =>
-      intentManager.handleAction({
-        action: 'execute',
-        intent: { type: 'k8s.apply', inputs: { overlay: '/repo/overlay' } },
-      }),
-    /apply=true/
+    policyService
   );
 
   const executed = await intentManager.handleAction({
     action: 'execute',
     apply: true,
-    save_evidence: true,
-    intent: { type: 'k8s.apply', inputs: { overlay: '/repo/overlay' } },
+    project: 'demo',
+    target: 'prod',
+    intent: {
+      type: 'gitops.propose',
+      inputs: {
+        patch: 'diff --git a/a b/a\n',
+        message: 'test',
+      },
+    },
   });
+
   assert.equal(executed.success, true);
-  assert.ok(executed.evidence_path);
+  assert.equal(resolverCalls, 1);
+  assert.equal(executed.plan.steps[0].inputs.kubeconfig, '/tmp/kubeconfig');
 });

@@ -94,6 +94,7 @@ test('Audit log redacts env maps and summaries stdin/content payloads', async ()
     action: 'fs_write',
     path: '/tmp/.env',
     content: 'SECRET=top-secret',
+    patch: 'diff --git a/a b/a\n+token: 123\n',
     stdin: 'top-secret',
     content_base64: Buffer.from('top-secret').toString('base64'),
   });
@@ -104,6 +105,7 @@ test('Audit log redacts env maps and summaries stdin/content payloads', async ()
 
   assert.equal(entries[0].input.env.DATABASE_URL, '[REDACTED]');
   assert.ok(String(entries[1].input.content).startsWith('[content:'));
+  assert.ok(String(entries[1].input.patch).startsWith('[patch:'));
   assert.ok(String(entries[1].input.stdin).startsWith('[stdin:'));
   assert.ok(String(entries[1].input.content_base64).startsWith('[base64:'));
 

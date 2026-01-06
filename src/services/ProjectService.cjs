@@ -76,6 +76,61 @@ class ProjectService {
     allowString(target.cwd, 'target.cwd');
     allowString(target.env_path, 'target.env_path');
     allowString(target.description, 'target.description');
+
+    if (target.policy !== undefined && target.policy !== null) {
+      if (typeof target.policy !== 'object' || Array.isArray(target.policy)) {
+        throw new Error('target.policy must be an object');
+      }
+
+      allowString(target.policy.mode, 'target.policy.mode');
+
+      const allowOptionalObject = (value, label) => {
+        if (value === undefined || value === null) {
+          return;
+        }
+        if (typeof value !== 'object' || Array.isArray(value)) {
+          throw new Error(`${label} must be an object`);
+        }
+      };
+
+      allowOptionalObject(target.policy.allow, 'target.policy.allow');
+      if (target.policy.allow?.intents !== undefined && target.policy.allow?.intents !== null) {
+        if (!Array.isArray(target.policy.allow.intents)) {
+          throw new Error('target.policy.allow.intents must be an array');
+        }
+      }
+
+      allowOptionalObject(target.policy.repo, 'target.policy.repo');
+      if (target.policy.repo?.allowed_remotes !== undefined && target.policy.repo?.allowed_remotes !== null) {
+        if (!Array.isArray(target.policy.repo.allowed_remotes)) {
+          throw new Error('target.policy.repo.allowed_remotes must be an array');
+        }
+      }
+
+      allowOptionalObject(target.policy.kubernetes, 'target.policy.kubernetes');
+      if (target.policy.kubernetes?.allowed_namespaces !== undefined && target.policy.kubernetes?.allowed_namespaces !== null) {
+        if (!Array.isArray(target.policy.kubernetes.allowed_namespaces)) {
+          throw new Error('target.policy.kubernetes.allowed_namespaces must be an array');
+        }
+      }
+
+      if (target.policy.change_windows !== undefined && target.policy.change_windows !== null) {
+        if (!Array.isArray(target.policy.change_windows)) {
+          throw new Error('target.policy.change_windows must be an array');
+        }
+      }
+
+      allowOptionalObject(target.policy.lock, 'target.policy.lock');
+      if (target.policy.lock?.enabled !== undefined && typeof target.policy.lock.enabled !== 'boolean') {
+        throw new Error('target.policy.lock.enabled must be a boolean');
+      }
+      if (target.policy.lock?.ttl_ms !== undefined && target.policy.lock.ttl_ms !== null) {
+        const numeric = Number(target.policy.lock.ttl_ms);
+        if (!Number.isFinite(numeric) || numeric <= 0) {
+          throw new Error('target.policy.lock.ttl_ms must be a positive number');
+        }
+      }
+    }
   }
 
   validateProject(project) {
@@ -90,6 +145,12 @@ class ProjectService {
     if (project.default_target !== undefined) {
       if (typeof project.default_target !== 'string' || project.default_target.trim().length === 0) {
         throw new Error('project.default_target must be a non-empty string');
+      }
+    }
+
+    if (project.repo_root !== undefined && project.repo_root !== null) {
+      if (typeof project.repo_root !== 'string' || project.repo_root.trim().length === 0) {
+        throw new Error('project.repo_root must be a non-empty string');
       }
     }
 

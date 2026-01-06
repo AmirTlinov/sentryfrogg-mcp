@@ -118,6 +118,11 @@ class ToolExecutor {
         ? cleaned.stdin
         : `[stdin:${String(cleaned.stdin).length}]`;
     }
+    if (Object.prototype.hasOwnProperty.call(cleaned, 'patch')) {
+      cleaned.patch = cleaned.patch === undefined || cleaned.patch === null
+        ? cleaned.patch
+        : `[patch:${String(cleaned.patch).length}]`;
+    }
     if (Object.prototype.hasOwnProperty.call(cleaned, 'content')) {
       if (typeof cleaned.content === 'string') {
         cleaned.content = `[content:${cleaned.content.length}]`;

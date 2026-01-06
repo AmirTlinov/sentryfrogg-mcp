@@ -2,6 +2,40 @@
 
 const { getPathValue } = require('./dataPath.cjs');
 
+function resolveEmptyDefault(output) {
+  if (output && typeof output === 'object') {
+    if (output.map) {
+      return [];
+    }
+    if (output.pick || output.omit) {
+      return {};
+    }
+  }
+  return {};
+}
+
+function resolveMissingDefault(output) {
+  if (!output || typeof output !== 'object') {
+    return undefined;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(output, 'default')) {
+    return output.default;
+  }
+
+  switch (output.missing) {
+    case 'null':
+      return null;
+    case 'undefined':
+      return undefined;
+    case 'empty':
+      return resolveEmptyDefault(output);
+    case 'error':
+    default:
+      return undefined;
+  }
+}
+
 function pickFields(value, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return value;
@@ -35,7 +69,7 @@ function applyOutputTransform(value, output) {
 
   const missingMode = output.missing || 'error';
   const required = missingMode === 'error';
-  const defaultValue = output.default;
+  const defaultValue = resolveMissingDefault(output);
 
   let current = value;
   if (output.path) {
@@ -55,7 +89,10 @@ function applyOutputTransform(value, output) {
       if (required) {
         throw new Error('Output map expects an array result');
       }
-    } else {
+      current = defaultValue;
+    }
+
+    if (Array.isArray(current)) {
       current = current.map((item) => applyOutputTransform(item, output.map));
     }
   }

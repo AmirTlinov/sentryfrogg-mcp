@@ -94,6 +94,278 @@
       "when": { "tags_any": ["k8s"] },
       "effects": { "kind": "write", "requires_apply": true }
     },
+    "gitops.status.argocd": {
+      "intent": "gitops.status",
+      "description": "GitOps status (ArgoCD marker): repo snapshot.",
+      "runbook": "gitops.status.argocd",
+      "tags": ["gitops", "argocd", "read"],
+      "inputs": {
+        "required": [],
+        "defaults": {},
+        "map": {
+          "repo_root": "context.root"
+        }
+      },
+      "when": { "tags_any": ["argocd"] },
+      "effects": { "kind": "read", "requires_apply": false }
+    },
+    "gitops.status.flux": {
+      "intent": "gitops.status",
+      "description": "GitOps status (Flux marker): repo snapshot.",
+      "runbook": "gitops.status.flux",
+      "tags": ["gitops", "flux", "read"],
+      "inputs": {
+        "required": [],
+        "defaults": {},
+        "map": {
+          "repo_root": "context.root"
+        }
+      },
+      "when": { "tags_any": ["flux"] },
+      "effects": { "kind": "read", "requires_apply": false }
+    },
+    "gitops.plan.argocd": {
+      "intent": "gitops.plan",
+      "description": "GitOps plan (ArgoCD marker): render + git diff.",
+      "runbook": "gitops.plan.argocd",
+      "tags": ["gitops", "argocd", "read"],
+      "inputs": {
+        "required": ["overlay"],
+        "defaults": {},
+        "map": {
+          "repo_root": "context.root"
+        }
+      },
+      "when": { "tags_any": ["argocd"] },
+      "effects": { "kind": "read", "requires_apply": false }
+    },
+    "gitops.plan.flux": {
+      "intent": "gitops.plan",
+      "description": "GitOps plan (Flux marker): render + git diff.",
+      "runbook": "gitops.plan.flux",
+      "tags": ["gitops", "flux", "read"],
+      "inputs": {
+        "required": ["overlay"],
+        "defaults": {},
+        "map": {
+          "repo_root": "context.root"
+        }
+      },
+      "when": { "tags_any": ["flux"] },
+      "effects": { "kind": "read", "requires_apply": false }
+    },
+    "gitops.propose": {
+      "intent": "gitops.propose",
+      "description": "GitOps propose: branch + patch + commit + push + PR/MR.",
+      "runbook": "gitops.propose",
+      "tags": ["gitops", "write"],
+      "inputs": {
+        "required": ["patch", "message"],
+        "defaults": {
+          "remote": "origin",
+          "branch_prefix": "sf/gitops",
+          "title": "GitOps update",
+          "wait_for_checks": false,
+          "checks_max_attempts": 30,
+          "checks_delay_ms": 2000,
+          "merge": false,
+          "merge_method": "squash",
+          "github_api_base_url": "https://api.github.com",
+          "gitlab_api_base_url": "https://gitlab.com/api/v4"
+        },
+        "map": {
+          "repo_root": "context.root"
+        }
+      },
+      "when": { "tags_any": ["gitops"] },
+      "effects": { "kind": "write", "requires_apply": true }
+    },
+    "gitops.sync.argocd": {
+      "intent": "gitops.sync",
+      "description": "GitOps sync (ArgoCD): trigger sync and wait for Synced/Healthy.",
+      "runbook": "gitops.sync.argocd",
+      "tags": ["gitops", "argocd", "write"],
+      "inputs": {
+        "required": ["app_name", "kubeconfig"],
+        "defaults": { "namespace": "argocd", "wait": true, "max_attempts": 30, "delay_ms": 2000 },
+        "map": {
+          "repo_root": "context.root",
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["argocd"] },
+      "effects": { "kind": "write", "requires_apply": true }
+    },
+    "gitops.sync.flux": {
+      "intent": "gitops.sync",
+      "description": "GitOps sync (Flux): request reconcile and wait for Ready=True.",
+      "runbook": "gitops.sync.flux",
+      "tags": ["gitops", "flux", "write"],
+      "inputs": {
+        "required": ["kustomization_name", "kubeconfig"],
+        "defaults": { "namespace": "flux-system", "wait": true, "max_attempts": 30, "delay_ms": 2000 },
+        "map": {
+          "repo_root": "context.root",
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["flux"] },
+      "effects": { "kind": "write", "requires_apply": true }
+    },
+    "gitops.verify.argocd": {
+      "intent": "gitops.verify",
+      "description": "GitOps verify (ArgoCD): wait for Synced/Healthy.",
+      "runbook": "gitops.verify.argocd",
+      "tags": ["gitops", "argocd", "read"],
+      "inputs": {
+        "required": ["app_name", "kubeconfig"],
+        "defaults": {
+          "namespace": "argocd",
+          "max_attempts": 30,
+          "delay_ms": 2000,
+          "metrics_max_attempts": 6,
+          "metrics_delay_ms": 10000
+        },
+        "map": {
+          "repo_root": "context.root",
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["argocd"] },
+      "effects": { "kind": "read", "requires_apply": false }
+    },
+    "gitops.verify.flux": {
+      "intent": "gitops.verify",
+      "description": "GitOps verify (Flux): wait for Ready=True.",
+      "runbook": "gitops.verify.flux",
+      "tags": ["gitops", "flux", "read"],
+      "inputs": {
+        "required": ["kustomization_name", "kubeconfig"],
+        "defaults": {
+          "namespace": "flux-system",
+          "max_attempts": 30,
+          "delay_ms": 2000,
+          "metrics_max_attempts": 6,
+          "metrics_delay_ms": 10000
+        },
+        "map": {
+          "repo_root": "context.root",
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["flux"] },
+      "effects": { "kind": "read", "requires_apply": false }
+    },
+    "gitops.rollback.argocd": {
+      "intent": "gitops.rollback",
+      "description": "GitOps rollback (ArgoCD): revert git commit, push, sync, verify.",
+      "runbook": "gitops.rollback.argocd",
+      "tags": ["gitops", "argocd", "write"],
+      "inputs": {
+        "required": ["app_name", "kubeconfig"],
+        "defaults": {
+          "namespace": "argocd",
+          "remote": "origin",
+          "wait": true,
+          "max_attempts": 30,
+          "delay_ms": 2000
+        },
+        "map": {
+          "repo_root": "context.root",
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["argocd"] },
+      "effects": { "kind": "write", "requires_apply": true }
+    },
+    "gitops.rollback.flux": {
+      "intent": "gitops.rollback",
+      "description": "GitOps rollback (Flux): revert git commit, push, reconcile, verify.",
+      "runbook": "gitops.rollback.flux",
+      "tags": ["gitops", "flux", "write"],
+      "inputs": {
+        "required": ["kustomization_name", "kubeconfig"],
+        "defaults": {
+          "namespace": "flux-system",
+          "remote": "origin",
+          "wait": true,
+          "max_attempts": 30,
+          "delay_ms": 2000
+        },
+        "map": {
+          "repo_root": "context.root",
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["flux"] },
+      "effects": { "kind": "write", "requires_apply": true }
+    },
+    "gitops.release.argocd": {
+      "intent": "gitops.release",
+      "description": "GitOps release autopilot (ArgoCD): plan→propose→merge→sync→verify→rollback.",
+      "runbook": "gitops.release",
+      "tags": ["gitops", "argocd", "write"],
+      "inputs": {
+        "required": ["patch", "message", "app_name", "kubeconfig"],
+        "defaults": {
+          "namespace": "argocd",
+          "remote": "origin",
+          "branch_prefix": "sf/gitops",
+          "title": "GitOps release",
+          "wait": true,
+          "max_attempts": 30,
+          "delay_ms": 2000,
+          "metrics_max_attempts": 6,
+          "metrics_delay_ms": 10000,
+          "wait_for_checks": true,
+          "checks_max_attempts": 30,
+          "checks_delay_ms": 2000,
+          "merge": true,
+          "merge_method": "squash",
+          "github_api_base_url": "https://api.github.com",
+          "gitlab_api_base_url": "https://gitlab.com/api/v4"
+        },
+        "map": {
+          "repo_root": "context.root",
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["argocd"] },
+      "effects": { "kind": "write", "requires_apply": true }
+    },
+    "gitops.release.flux": {
+      "intent": "gitops.release",
+      "description": "GitOps release autopilot (Flux): plan→propose→merge→sync→verify→rollback.",
+      "runbook": "gitops.release",
+      "tags": ["gitops", "flux", "write"],
+      "inputs": {
+        "required": ["patch", "message", "kustomization_name", "kubeconfig"],
+        "defaults": {
+          "namespace": "flux-system",
+          "remote": "origin",
+          "branch_prefix": "sf/gitops",
+          "title": "GitOps release",
+          "wait": true,
+          "max_attempts": 30,
+          "delay_ms": 2000,
+          "metrics_max_attempts": 6,
+          "metrics_delay_ms": 10000,
+          "wait_for_checks": true,
+          "checks_max_attempts": 30,
+          "checks_delay_ms": 2000,
+          "merge": true,
+          "merge_method": "squash",
+          "github_api_base_url": "https://api.github.com",
+          "gitlab_api_base_url": "https://gitlab.com/api/v4"
+        },
+        "map": {
+          "repo_root": "context.root",
+          "kubeconfig": "target.kubeconfig"
+        }
+      },
+      "when": { "tags_any": ["flux"] },
+      "effects": { "kind": "write", "requires_apply": true }
+    },
     "registry.tags.list": {
       "intent": "registry.tags.list",
       "description": "List repository tags via registry API.",

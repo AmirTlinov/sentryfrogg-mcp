@@ -69,7 +69,16 @@ class WorkspaceManager {
       }
       const inputs = args.intent?.inputs || args.inputs || args.input || {};
       const intent = { type, inputs };
-      const action = args.apply ? 'execute' : 'dry_run';
+
+      const apply = Boolean(args.apply);
+      if (apply) {
+        return this.intentManager.handleAction({ ...args, action: 'execute', intent });
+      }
+
+      const compiled = await this.intentManager.handleAction({ ...args, action: 'compile', intent });
+      const requiresApply = Boolean(compiled?.plan?.effects?.requires_apply);
+
+      const action = requiresApply ? 'dry_run' : 'execute';
       return this.intentManager.handleAction({ ...args, action, intent });
     }
     return this.runbookManager.handleAction({ ...args, action: 'runbook_run' });

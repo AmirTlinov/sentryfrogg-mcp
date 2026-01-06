@@ -22,12 +22,11 @@ function callTool(id, name, args) {
   };
 }
 
-function parseToolEnvelope(resp) {
+function parseToolText(resp) {
   assert.equal(resp.jsonrpc, '2.0');
   assert.ok(resp.result);
   assert.ok(Array.isArray(resp.result.content));
-  const text = resp.result.content[0].text;
-  return JSON.parse(text);
+  return resp.result.content[0].text;
 }
 
 test('help returns actions for tools and supports tool/action drill-down', async () => {
@@ -37,27 +36,36 @@ test('help returns actions for tools and supports tool/action drill-down', async
     JSON.parse(await readLine(proc.stdout));
 
     proc.stdin.write(JSON.stringify(callTool(2, 'help', {})) + '\n');
-    const root = parseToolEnvelope(JSON.parse(await readLine(proc.stdout)));
-    assert.equal(root.ok, true);
-    assert.ok(root.result.tools.some((t) => t.name === 'mcp_ssh_manager'));
-    const sshEntry = root.result.tools.find((t) => t.name === 'mcp_ssh_manager');
-    assert.ok(Array.isArray(sshEntry.actions));
-    assert.ok(sshEntry.actions.includes('exec'));
+    const root = parseToolText(JSON.parse(await readLine(proc.stdout)));
+    assert.ok(root.includes('[DATA]'));
+    assert.ok(root.includes('Tools:'));
+    assert.ok(root.includes('- mcp_ssh_manager:'));
+    assert.ok(root.includes('- legend:'));
 
     proc.stdin.write(JSON.stringify(callTool(3, 'help', { tool: 'mcp_ssh_manager' })) + '\n');
-    const sshHelp = parseToolEnvelope(JSON.parse(await readLine(proc.stdout)));
-    assert.equal(sshHelp.ok, true);
-    assert.ok(Array.isArray(sshHelp.result.actions));
-    assert.ok(sshHelp.result.actions.includes('authorized_keys_add'));
+    const sshHelp = parseToolText(JSON.parse(await readLine(proc.stdout)));
+    assert.ok(sshHelp.includes('Actions:'));
+    assert.ok(sshHelp.includes('- authorized_keys_add'));
 
     proc.stdin.write(JSON.stringify(callTool(4, 'help', { tool: 'ssh', action: 'exec' })) + '\n');
-    const sshExec = parseToolEnvelope(JSON.parse(await readLine(proc.stdout)));
-    assert.equal(sshExec.ok, true);
-    assert.equal(sshExec.result.action, 'exec');
-    assert.equal(sshExec.result.example.action, 'exec');
-    assert.ok(typeof sshExec.result.example.command === 'string');
+    const sshExec = parseToolText(JSON.parse(await readLine(proc.stdout)));
+    assert.ok(sshExec.includes("A: help({ tool: 'mcp_ssh_manager', action: 'exec' })"));
+    assert.ok(sshExec.includes('```json'));
+    assert.ok(sshExec.includes('"action": "exec"'));
+    assert.ok(sshExec.includes('"command": "uname -a"'));
+
+    proc.stdin.write(JSON.stringify(callTool(5, 'help', { tool: 'legend' })) + '\n');
+    const helpLegend = parseToolText(JSON.parse(await readLine(proc.stdout)));
+    assert.ok(helpLegend.includes('A: legend()'));
+    assert.ok(helpLegend.includes('Common fields:'));
+    assert.ok(helpLegend.includes('- output:'));
+    assert.ok(helpLegend.includes('Resolution:'));
+
+    proc.stdin.write(JSON.stringify(callTool(6, 'legend', {})) + '\n');
+    const legend = parseToolText(JSON.parse(await readLine(proc.stdout)));
+    assert.ok(legend.includes('A: legend()'));
+    assert.ok(legend.includes('Golden path:'));
   } finally {
     await terminate(proc);
   }
 });
-

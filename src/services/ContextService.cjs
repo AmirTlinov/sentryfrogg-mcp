@@ -20,6 +20,19 @@ const MARKERS = [
   { tag: 'docker', files: ['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml'] },
   { tag: 'k8s', files: ['kustomization.yaml', 'kustomization.yml', 'Kustomization'] },
   { tag: 'helm', files: ['Chart.yaml'] },
+  { tag: 'argocd', files: ['.argocd', 'argocd-application.yaml', 'Application.yaml'] },
+  {
+    tag: 'flux',
+    files: [
+      '.flux',
+      'flux-system',
+      'gotk-components.yaml',
+      'gotk-sync.yaml',
+      'flux-system/gotk-components.yaml',
+      'flux-system/gotk-sync.yaml',
+      'flux-system/kustomization.yaml',
+    ],
+  },
   { tag: 'terraform', files: ['main.tf', 'terraform.tf', 'terragrunt.hcl'] },
   { tag: 'ansible', files: ['ansible.cfg', 'playbook.yml', 'playbook.yaml'] },
   { tag: 'ci', files: ['.github/workflows', 'gitlab-ci.yml', 'Jenkinsfile'] },
@@ -87,6 +100,9 @@ function deriveTags(signals, gitRoot) {
   const tags = Object.entries(signals)
     .filter(([, value]) => value)
     .map(([key]) => key);
+  if (signals.argocd || signals.flux) {
+    tags.push('gitops');
+  }
   if (gitRoot) {
     tags.push('git');
   }

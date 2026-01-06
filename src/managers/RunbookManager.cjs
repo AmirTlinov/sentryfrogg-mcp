@@ -9,6 +9,36 @@ const { resolveTemplates, resolveTemplateString } = require('../utils/template.c
 const { getPathValue } = require('../utils/dataPath.cjs');
 const { parseRunbookDsl } = require('../utils/runbookDsl.cjs');
 
+const MAX_RETRY_ATTEMPTS = 50;
+const MAX_RETRY_DELAY_MS = 60_000;
+const MAX_RETRY_TOTAL_DELAY_MS = 10 * 60_000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function asPositiveInt(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return fallback;
+  }
+  return Math.floor(numeric);
+}
+
+function asNonNegativeInt(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return fallback;
+  }
+  return Math.floor(numeric);
+}
+
+function asPositiveNumber(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return fallback;
+  }
+  return numeric;
+}
+
 class RunbookManager {
   constructor(logger, runbookService, stateService, toolExecutor) {
     this.logger = logger.child('runbook');
@@ -92,7 +122,7 @@ class RunbookManager {
     }
 
     const results = [];
-    const context = await this.buildContext(input, {});
+    const context = await this.buildContext(input, {}, { traceId, spanId: runbookSpanId, parentSpanId: args.parent_span_id });
 
     for (let index = 0; index < runbookPayload.steps.length; index += 1) {
       const step = runbookPayload.steps[index];
@@ -137,12 +167,15 @@ class RunbookManager {
     };
   }
 
-  async buildContext(input, steps) {
+  async buildContext(input, steps, meta = {}) {
     const snapshot = await this.stateService.dump('any');
     return {
       input,
       state: snapshot.state,
       steps,
+      trace_id: meta.traceId,
+      span_id: meta.spanId,
+      parent_span_id: meta.parentSpanId,
     };
   }
 
@@ -246,6 +279,7 @@ class RunbookManager {
 
     const baseArgs = step.args || {};
     const resolvedArgs = step.foreach ? baseArgs : resolveTemplates(baseArgs, context, options);
+    const retryConfig = step.retry ? resolveTemplates(step.retry, context, options) : null;
     const applyTrace = (args) => {
       const merged = { ...args };
       if (options?.traceId && merged.trace_id === undefined) {
@@ -258,6 +292,9 @@ class RunbookManager {
     };
 
     if (step.foreach) {
+      if (retryConfig) {
+        throw new Error(`runbook step '${stepKey}' cannot combine foreach with retry`);
+      }
       const foreachConfig = resolveTemplates(step.foreach, context, options);
       const items = foreachConfig.items;
       if (!Array.isArray(items)) {
@@ -295,6 +332,85 @@ class RunbookManager {
         result: results,
         foreach: { count: items.length },
       };
+    }
+
+    if (retryConfig && typeof retryConfig === 'object' && retryConfig.max_attempts !== undefined) {
+      const maxAttempts = Math.min(
+        asPositiveInt(retryConfig.max_attempts, 1),
+        MAX_RETRY_ATTEMPTS
+      );
+      const delayMs = Math.min(
+        asNonNegativeInt(retryConfig.delay_ms ?? retryConfig.base_delay_ms, 0),
+        MAX_RETRY_DELAY_MS
+      );
+      const backoffFactor = asPositiveNumber(retryConfig.backoff_factor ?? retryConfig.backoff, 1);
+      const maxDelayMs = retryConfig.max_delay_ms === undefined || retryConfig.max_delay_ms === null
+        ? null
+        : Math.min(asNonNegativeInt(retryConfig.max_delay_ms, delayMs), MAX_RETRY_DELAY_MS);
+      const retryOnError = retryConfig.retry_on_error !== false;
+      const until = retryConfig.until;
+
+      const attempts = [];
+      let totalDelayMs = 0;
+      let lastError = null;
+
+      for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
+        const attempt = { index: attemptIndex, number: attemptIndex + 1, max_attempts: maxAttempts };
+        const attemptContext = { ...context, attempt };
+
+        try {
+          const argsForAttempt = resolveTemplates(baseArgs, attemptContext, options);
+          const output = await this.toolExecutor.execute(step.tool, applyTrace(argsForAttempt));
+          attempts.push({ success: true, result: output.result });
+
+          const untilContext = { ...attemptContext, result: output.result, meta: output.meta };
+          const satisfied = until === undefined || until === null
+            ? true
+            : this.evaluateWhen(until, untilContext, options);
+
+          if (satisfied) {
+            return {
+              id: stepKey,
+              tool: step.tool,
+              action: argsForAttempt.action,
+              success: true,
+              result: output.result,
+              meta: output.meta,
+              retry: { attempts: attemptIndex + 1 },
+            };
+          }
+
+          lastError = new Error(`retry condition not satisfied (attempt ${attemptIndex + 1}/${maxAttempts})`);
+        } catch (error) {
+          lastError = error;
+          attempts.push({ success: false, error: error.message });
+          if (!retryOnError) {
+            throw error;
+          }
+        }
+
+        if (attemptIndex >= maxAttempts - 1) {
+          break;
+        }
+
+        let nextDelay = delayMs;
+        if (backoffFactor !== 1 && delayMs > 0) {
+          nextDelay = Math.floor(delayMs * Math.pow(backoffFactor, attemptIndex));
+        }
+        if (maxDelayMs !== null) {
+          nextDelay = Math.min(nextDelay, maxDelayMs);
+        }
+        if (nextDelay > 0) {
+          if (totalDelayMs + nextDelay > MAX_RETRY_TOTAL_DELAY_MS) {
+            throw new Error(`retry budget exceeded (${MAX_RETRY_TOTAL_DELAY_MS}ms)`);
+          }
+          totalDelayMs += nextDelay;
+          await sleep(nextDelay);
+        }
+      }
+
+      const message = lastError ? lastError.message : 'retry attempts exhausted';
+      throw new Error(`Retry failed after ${maxAttempts} attempts: ${message}`);
     }
 
     const output = await this.toolExecutor.execute(step.tool, applyTrace(resolvedArgs));

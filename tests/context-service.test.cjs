@@ -22,6 +22,8 @@ test('ContextService detects markers and caches context', async (t) => {
   await fs.writeFile(path.join(tmpRoot, 'package.json'), '{"name":"demo"}');
   await fs.writeFile(path.join(tmpRoot, 'Dockerfile'), 'FROM alpine');
   await fs.mkdir(path.join(tmpRoot, '.git'), { recursive: true });
+  await fs.mkdir(path.join(tmpRoot, '.argocd'), { recursive: true });
+  await fs.mkdir(path.join(tmpRoot, 'flux-system'), { recursive: true });
 
   t.after(async () => {
     if (previousContext === undefined) {
@@ -42,6 +44,9 @@ test('ContextService detects markers and caches context', async (t) => {
   assert.ok(context.tags.includes('node'));
   assert.ok(context.tags.includes('docker'));
   assert.ok(context.tags.includes('git'));
+  assert.ok(context.tags.includes('argocd'));
+  assert.ok(context.tags.includes('flux'));
+  assert.ok(context.tags.includes('gitops'));
 
   const list = await service.listContexts();
   assert.equal(list.contexts.length, 1);

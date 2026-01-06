@@ -47,6 +47,26 @@ class Security {
     this.secretKey = this.loadOrCreateSecret();
   }
 
+  ensureSizeFits(payload, options = {}) {
+    const maxBytesEnv = process.env.SENTRYFROGG_MAX_PAYLOAD_BYTES || process.env.SF_MAX_PAYLOAD_BYTES;
+    const maxBytes = Number.isFinite(options.maxBytes)
+      ? options.maxBytes
+      : (maxBytesEnv ? Number(maxBytesEnv) : Constants.BUFFERS.MAX_LOG_SIZE);
+
+    const text = typeof payload === 'string' ? payload : String(payload ?? '');
+    const bytes = Buffer.byteLength(text, 'utf8');
+
+    if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
+      return { ok: true, bytes };
+    }
+
+    if (bytes > maxBytes) {
+      throw new Error(`Payload exceeds size limit (${bytes} bytes > ${maxBytes} bytes)`);
+    }
+
+    return { ok: true, bytes, maxBytes };
+  }
+
   loadOrCreateSecret() {
     const fromEnv = decodeKey(process.env.ENCRYPTION_KEY);
     if (fromEnv) {

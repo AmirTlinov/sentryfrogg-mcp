@@ -5,6 +5,8 @@
  */
 
 const SECRET_FIELD_PATTERN = /(key|token|secret|pass|pwd)/i;
+const crypto = require('crypto');
+const { matchesWhen } = require('../utils/whenMatcher.cjs');
 
 function getByPath(source, path) {
   if (!path) {
@@ -95,7 +97,8 @@ class IntentManager {
     runbookManager,
     evidenceService,
     projectResolver,
-    contextService
+    contextService,
+    policyService
   ) {
     this.logger = logger.child('intent');
     this.security = security;
@@ -105,6 +108,7 @@ class IntentManager {
     this.evidenceService = evidenceService;
     this.projectResolver = projectResolver;
     this.contextService = contextService;
+    this.policyService = policyService;
   }
 
   async handleAction(args = {}) {
@@ -130,7 +134,7 @@ class IntentManager {
 
   async explain(args) {
     const intent = await this.normalizeIntent(args);
-    const capability = await this.resolveCapability(intent.type);
+    const capability = await this.resolveCapability(intent.type, intent.context || intent.inputs.context);
     const { resolved, missing } = normalizeInputs(intent.inputs, capability);
     return {
       success: true,
@@ -161,37 +165,71 @@ class IntentManager {
       };
     }
 
+    const traceId = args.trace_id || crypto.randomUUID();
     const apply = Boolean(args.apply || plan.intent.apply);
     if (plan.effects.requires_apply && !apply) {
       throw new Error('Intent requires apply=true for write/mixed effects');
+    }
+
+    const isGitOpsWrite = apply
+      && plan.effects.requires_apply
+      && typeof plan.intent.type === 'string'
+      && plan.intent.type.startsWith('gitops.');
+
+    let policyGuard = null;
+    if (isGitOpsWrite && this.policyService) {
+      const repoRoot = args.repo_root || plan.intent.inputs?.repo_root || plan.intent.inputs?.context?.root;
+      const projectName = plan.intent.project || plan.intent.inputs?.context?.project_name;
+      const targetName = plan.intent.target || plan.intent.inputs?.context?.target_name;
+
+      policyGuard = await this.policyService.guardGitOpsWrite({
+        intentType: plan.intent.type,
+        inputs: plan.intent.inputs,
+        traceId,
+        projectName,
+        targetName,
+        repoRoot,
+      });
+    } else if (isGitOpsWrite && !this.policyService) {
+      throw new Error('Policy service is not available for GitOps write intents');
     }
 
     const stopOnError = args.stop_on_error !== false;
     const results = [];
     let success = true;
 
-    for (const step of plan.steps) {
-      const result = await this.runbookManager.handleAction({
-        action: 'runbook_run',
-        name: step.runbook,
-        input: step.inputs,
-        stop_on_error: stopOnError,
-        template_missing: args.template_missing,
-        trace_id: args.trace_id,
-        span_id: args.span_id,
-        parent_span_id: args.parent_span_id,
-      });
-      results.push({
-        capability: step.capability,
-        runbook: step.runbook,
-        result,
-      });
-      if (!result.success && stopOnError) {
-        success = false;
-        break;
+    try {
+      for (const step of plan.steps) {
+        const result = await this.runbookManager.handleAction({
+          action: 'runbook_run',
+          name: step.runbook,
+          input: step.inputs,
+          stop_on_error: stopOnError,
+          template_missing: args.template_missing,
+          trace_id: traceId,
+          span_id: args.span_id,
+          parent_span_id: args.parent_span_id,
+        });
+        results.push({
+          capability: step.capability,
+          runbook: step.runbook,
+          result,
+        });
+        if (!result.success && stopOnError) {
+          success = false;
+          break;
+        }
+        if (!result.success) {
+          success = false;
+        }
       }
-      if (!result.success) {
-        success = false;
+    } finally {
+      if (policyGuard) {
+        try {
+          await policyGuard.release();
+        } catch (error) {
+          this.logger.warn('Failed to release policy lock', { error: error.message });
+        }
       }
     }
 
@@ -229,7 +267,28 @@ class IntentManager {
     let target = this.validation.ensureOptionalString(args.target ?? intent.target, 'Target');
     let context = null;
 
-    if ((!project || !target) && this.projectResolver) {
+    const resolveFromInputs = (value, label) => {
+      if (value === undefined || value === null) {
+        return undefined;
+      }
+      if (typeof value !== 'string') {
+        return this.validation.ensureOptionalString(String(value), label);
+      }
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return undefined;
+      }
+      return this.validation.ensureOptionalString(trimmed, label);
+    };
+
+    if (!project) {
+      project = resolveFromInputs(inputs.project_name, 'Project') || project;
+    }
+    if (!target) {
+      target = resolveFromInputs(inputs.target_name, 'Target') || target;
+    }
+
+    if (this.projectResolver) {
       context = await this.projectResolver.resolveContext({ ...args, project, target }).catch(() => null);
       if (!project && context?.projectName) {
         project = context.projectName;
@@ -281,23 +340,46 @@ class IntentManager {
     };
   }
 
-  async resolveCapability(intentType) {
-    const capability = await this.capabilityService.findByIntent(intentType);
-    if (!capability) {
+  async resolveCapability(intentType, context) {
+    const candidates = await this.capabilityService.findAllByIntent(intentType);
+    if (!candidates || candidates.length === 0) {
       throw new Error(`Capability for intent '${intentType}' not found`);
     }
-    return capability;
+
+    const resolvedContext = context && typeof context === 'object' ? context : {};
+    const matched = [];
+    for (const candidate of candidates) {
+      if (await matchesWhen(candidate.when, resolvedContext)) {
+        matched.push(candidate);
+      }
+    }
+
+    if (matched.length === 0) {
+      throw new Error(`No capability matched when-clause for intent '${intentType}'`);
+    }
+
+    matched.sort((a, b) => {
+      const aIsDirect = a.name === intentType ? 0 : 1;
+      const bIsDirect = b.name === intentType ? 0 : 1;
+      if (aIsDirect !== bIsDirect) {
+        return aIsDirect - bIsDirect;
+      }
+      return String(a.name).localeCompare(String(b.name));
+    });
+
+    return matched[0];
   }
 
   async buildPlan(args, { allowMissing }) {
     const intent = await this.normalizeIntent(args);
-    const root = await this.resolveCapability(intent.type);
+    const root = await this.resolveCapability(intent.type, intent.context || intent.inputs.context);
     const ordered = await this.resolveDependencies(root.name);
     const steps = [];
     const missing = [];
 
     for (const capability of ordered) {
       const { resolved, missing: missingInputs } = normalizeInputs(intent.inputs, capability);
+      resolved.apply = intent.apply;
       steps.push({
         capability: capability.name,
         runbook: capability.runbook,

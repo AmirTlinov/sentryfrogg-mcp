@@ -14,6 +14,7 @@ function startServer(args = [], envOverrides = {}) {
     env: {
       ...process.env,
       MCP_PROFILES_DIR: profilesDir,
+      SF_CONTEXT_REPO_ROOT: profilesDir,
       ...envOverrides,
     },
   });

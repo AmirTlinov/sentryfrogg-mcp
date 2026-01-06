@@ -115,11 +115,39 @@ class CapabilityManager {
 
   async resolve(args) {
     const intent = this.validation.ensureString(args.intent, 'Intent type');
-    const capability = await this.capabilityService.findByIntent(intent);
-    if (!capability) {
+    const candidates = await this.capabilityService.findAllByIntent(intent);
+    if (!candidates || candidates.length === 0) {
       throw new Error(`Capability for intent '${intent}' not found`);
     }
-    return { success: true, capability };
+
+    const contextResult = this.contextService
+      ? await this.contextService.getContext(args).catch(() => null)
+      : null;
+    const context = contextResult?.context && typeof contextResult.context === 'object'
+      ? contextResult.context
+      : {};
+
+    const matched = [];
+    for (const candidate of candidates) {
+      if (await matchesWhen(candidate.when, context)) {
+        matched.push(candidate);
+      }
+    }
+
+    if (matched.length === 0) {
+      throw new Error(`No capability matched when-clause for intent '${intent}'`);
+    }
+
+    matched.sort((a, b) => {
+      const aIsDirect = a.name === intent ? 0 : 1;
+      const bIsDirect = b.name === intent ? 0 : 1;
+      if (aIsDirect !== bIsDirect) {
+        return aIsDirect - bIsDirect;
+      }
+      return String(a.name).localeCompare(String(b.name));
+    });
+
+    return { success: true, capability: matched[0], context: contextResult?.context };
   }
 
   async set(args) {

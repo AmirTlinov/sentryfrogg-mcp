@@ -121,20 +121,30 @@ class CapabilityService {
   }
 
   async findByIntent(intentType) {
+    const matches = await this.findAllByIntent(intentType);
+    return matches.length > 0 ? matches[0] : null;
+  }
+
+  async findAllByIntent(intentType) {
     await this.ensureReady();
     if (typeof intentType !== 'string' || intentType.trim().length === 0) {
       throw new Error('Intent type must be a non-empty string');
     }
     const key = intentType.trim();
-    if (this.capabilities.has(key)) {
-      return this.capabilities.get(key);
+
+    const matches = [];
+    const direct = this.capabilities.get(key);
+    if (direct) {
+      matches.push(direct);
     }
+
     for (const capability of this.capabilities.values()) {
-      if (capability.intent === key) {
-        return capability;
+      if (capability.intent === key && capability.name !== key) {
+        matches.push(capability);
       }
     }
-    return null;
+
+    return matches;
   }
 
   async setCapability(name, config) {

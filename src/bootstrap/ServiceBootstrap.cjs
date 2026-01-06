@@ -180,6 +180,7 @@ class ServiceBootstrap {
     const AuditService = require('../services/AuditService.cjs');
     const CacheService = require('../services/CacheService.cjs');
     const WorkspaceService = require('../services/WorkspaceService.cjs');
+    const PolicyService = require('../services/PolicyService.cjs');
 
     // Logger (базовый сервис)
     this.container.register('logger', () => {
@@ -262,6 +263,13 @@ class ServiceBootstrap {
       dependencies: ['logger', 'contextService', 'projectResolver', 'profileService'],
     });
 
+    // Policy service (GitOps hardening)
+    this.container.register('policyService', (logger, validation, stateService) =>
+      new PolicyService(logger, validation, stateService), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'stateService'],
+    });
+
     // Capability сервис
     this.container.register('capabilityService', (logger, security) =>
       new CapabilityService(logger, security), {
@@ -342,6 +350,7 @@ class ServiceBootstrap {
     const SSHManager = require('../managers/SSHManager.cjs');
     const APIManager = require('../managers/APIManager.cjs');
     const LocalManager = require('../managers/LocalManager.cjs');
+    const RepoManager = require('../managers/RepoManager.cjs');
     const StateManager = require('../managers/StateManager.cjs');
     const ProjectManager = require('../managers/ProjectManager.cjs');
     const EnvManager = require('../managers/EnvManager.cjs');
@@ -391,6 +400,14 @@ class ServiceBootstrap {
         dependencies: ['logger', 'validation'],
       });
     }
+
+    // Repo Manager (safe-by-default)
+    this.container.register('repoManager',
+      (logger, security, validation, projectResolver) =>
+        new RepoManager(logger, security, validation, projectResolver), {
+      singleton: true,
+      dependencies: ['logger', 'security', 'validation', 'projectResolver'],
+    });
 
     // State Manager
     this.container.register('stateManager',
@@ -450,11 +467,12 @@ class ServiceBootstrap {
 
     // Tool executor
     this.container.register('toolExecutor',
-      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, apiManager, stateManager, projectManager, envManager, vaultManager, contextManager, capabilityManager, evidenceManager, aliasManager, presetManager, auditManager, pipelineManager) =>
+      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, apiManager, repoManager, stateManager, projectManager, envManager, vaultManager, contextManager, capabilityManager, evidenceManager, aliasManager, presetManager, auditManager, pipelineManager) =>
         new ToolExecutor(logger, stateService, aliasService, presetService, auditService, {
           mcp_psql_manager: (args) => postgresqlManager.handleAction(args),
           mcp_ssh_manager: (args) => sshManager.handleAction(args),
           mcp_api_client: (args) => apiManager.handleAction(args),
+          mcp_repo: (args) => repoManager.handleAction(args),
           mcp_state: (args) => stateManager.handleAction(args),
           mcp_project: (args) => projectManager.handleAction(args),
           mcp_env: (args) => envManager.handleAction(args),
@@ -473,6 +491,7 @@ class ServiceBootstrap {
             ssh: 'mcp_ssh_manager',
             http: 'mcp_api_client',
             api: 'mcp_api_client',
+            repo: 'mcp_repo',
             state: 'mcp_state',
             project: 'mcp_project',
             env: 'mcp_env',
@@ -497,6 +516,7 @@ class ServiceBootstrap {
         'postgresqlManager',
         'sshManager',
         'apiManager',
+        'repoManager',
         'stateManager',
         'projectManager',
         'envManager',
@@ -521,8 +541,8 @@ class ServiceBootstrap {
 
     // Intent Manager
     this.container.register('intentManager',
-      (logger, security, validation, capabilityService, runbookManager, evidenceService, projectResolver, contextService) =>
-        new IntentManager(logger, security, validation, capabilityService, runbookManager, evidenceService, projectResolver, contextService), {
+      (logger, security, validation, capabilityService, runbookManager, evidenceService, projectResolver, contextService, policyService) =>
+        new IntentManager(logger, security, validation, capabilityService, runbookManager, evidenceService, projectResolver, contextService, policyService), {
       singleton: true,
       dependencies: [
         'logger',
@@ -533,6 +553,7 @@ class ServiceBootstrap {
         'evidenceService',
         'projectResolver',
         'contextService',
+        'policyService',
       ],
     });
 
