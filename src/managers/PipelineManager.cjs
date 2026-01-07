@@ -6,10 +6,167 @@
 
 const crypto = require('crypto');
 const { createReadStream } = require('fs');
-const { Readable } = require('stream');
+const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const readline = require('readline');
 const { redactObject } = require('../utils/redact.cjs');
+const { isTruthy } = require('../utils/featureFlags.cjs');
+const {
+  resolveContextRepoRoot,
+  buildToolCallFileRef,
+  createArtifactWriteStream,
+} = require('../utils/artifacts.cjs');
+
+const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
+
+function readPositiveInt(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return Math.floor(numeric);
+}
+
+function resolveStreamToArtifactMode() {
+  const raw = process.env.SENTRYFROGG_PIPELINE_STREAM_TO_ARTIFACT
+    || process.env.SF_PIPELINE_STREAM_TO_ARTIFACT
+    || process.env.SENTRYFROGG_STREAM_TO_ARTIFACT
+    || process.env.SF_STREAM_TO_ARTIFACT;
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  const normalized = String(raw).trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'full') {
+    return 'full';
+  }
+  if (normalized === 'capped') {
+    return 'capped';
+  }
+  return isTruthy(normalized) ? 'capped' : null;
+}
+
+function resolveMaxCaptureBytes() {
+  const fromEnv = readPositiveInt(
+    process.env.SENTRYFROGG_PIPELINE_MAX_CAPTURE_BYTES
+    || process.env.SF_PIPELINE_MAX_CAPTURE_BYTES
+    || process.env.SENTRYFROGG_MAX_CAPTURE_BYTES
+    || process.env.SF_MAX_CAPTURE_BYTES
+  );
+  return fromEnv ?? DEFAULT_MAX_CAPTURE_BYTES;
+}
+
+class ArtifactCaptureTransform extends Transform {
+  constructor(writer, { limitBytes, onDone }) {
+    super();
+    this.writer = writer;
+    this.limitBytes = limitBytes;
+    this.totalBytes = 0;
+    this.writtenBytes = 0;
+    this.truncated = false;
+    this.done = false;
+    this.onDone = typeof onDone === 'function' ? onDone : () => null;
+  }
+
+  _transform(chunk, encoding, callback) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? '', encoding);
+    this.totalBytes += buf.length;
+
+    if (this.writer && this.writtenBytes < this.limitBytes) {
+      const remaining = this.limitBytes - this.writtenBytes;
+      const slice = buf.length <= remaining ? buf : buf.subarray(0, remaining);
+      if (slice.length < buf.length) {
+        this.truncated = true;
+      }
+
+      try {
+        const ok = this.writer.stream.write(slice);
+        this.writtenBytes += slice.length;
+        this.push(buf);
+        if (!ok) {
+          this.writer.stream.once('drain', () => callback());
+          return;
+        }
+        callback();
+        return;
+      } catch (error) {
+        void this.writer.abort().catch(() => null);
+        this.writer = null;
+        this.truncated = true;
+      }
+    } else if (this.limitBytes !== Number.POSITIVE_INFINITY) {
+      this.truncated = true;
+    }
+
+    this.push(buf);
+    callback();
+  }
+
+  _final(callback) {
+    if (this.done) {
+      callback();
+      return;
+    }
+    this.done = true;
+
+    if (!this.writer || this.writtenBytes === 0) {
+      const cleanup = this.writer ? this.writer.abort().catch(() => null) : Promise.resolve();
+      cleanup
+        .then(() => {
+          this.onDone(null);
+          callback();
+        })
+        .catch(() => {
+          this.onDone(null);
+          callback();
+        });
+      return;
+    }
+
+    this.writer.finalize()
+      .then((artifact) => {
+        this.onDone({
+          uri: artifact.uri,
+          rel: artifact.rel,
+          bytes: artifact.bytes,
+          captured_bytes: this.writtenBytes,
+          total_bytes: this.totalBytes,
+          truncated: this.truncated,
+        });
+        callback();
+      })
+      .catch(() => {
+        this.writer.abort().catch(() => null)
+          .finally(() => {
+            this.onDone(null);
+            callback();
+          });
+      });
+  }
+
+  _destroy(error, callback) {
+    if (this.done) {
+      callback(error);
+      return;
+    }
+    this.done = true;
+    if (this.writer) {
+      this.writer.abort().catch(() => null)
+        .finally(() => {
+          this.onDone(null);
+          callback(error);
+        });
+      return;
+    }
+    this.onDone(null);
+    callback(error);
+  }
+}
 
 class PipelineManager {
   constructor(logger, validation, apiManager, sshManager, postgresqlManager, cacheService, auditService, projectResolver) {
@@ -248,6 +405,45 @@ class PipelineManager {
     };
   }
 
+  async captureStreamToArtifact(stream, trace, { prefix = 'stream' } = {}) {
+    const mode = resolveStreamToArtifactMode();
+    const contextRoot = mode ? resolveContextRepoRoot() : null;
+    if (!mode || !contextRoot || !stream) {
+      return { stream, artifact: null };
+    }
+
+    const limitBytes = mode === 'full' ? Number.POSITIVE_INFINITY : resolveMaxCaptureBytes();
+    const traceId = trace?.trace_id || 'run';
+    const spanId = trace?.parent_span_id || crypto.randomUUID();
+    const filename = `${prefix}-${crypto.randomUUID()}.bin`;
+    const ref = buildToolCallFileRef({ traceId, spanId, filename });
+
+    let writer;
+    try {
+      writer = await createArtifactWriteStream(contextRoot, ref);
+    } catch (error) {
+      this.logger.warn('Failed to initialize pipeline artifact stream', { error: error.message });
+      return { stream, artifact: null };
+    }
+
+    let resolveDone;
+    const done = new Promise((resolve) => {
+      resolveDone = resolve;
+    });
+
+    const tap = new ArtifactCaptureTransform(writer, { limitBytes, onDone: resolveDone });
+    void pipeline(stream, tap).catch(() => null);
+
+    return {
+      stream: tap,
+      artifact: {
+        uri: ref.uri,
+        rel: ref.rel,
+        done,
+      },
+    };
+  }
+
   async openHttpStream(httpArgs, cacheArgs, trace) {
     if (!httpArgs || typeof httpArgs !== 'object') {
       throw new Error('http config is required');
@@ -270,8 +466,14 @@ class PipelineManager {
       const cached = await this.cacheService.getFile(cacheKey, cachePolicy.ttl_ms);
       if (cached) {
         await this.auditStage('http_cache_hit', trace, { url: config.url, cache_key: cacheKey });
+        const captured = await this.captureStreamToArtifact(
+          createReadStream(cached.file_path),
+          trace,
+          { prefix: 'http-body' }
+        );
         return {
-          stream: createReadStream(cached.file_path),
+          stream: captured.stream,
+          artifact: captured.artifact,
           cache: { hit: true, key: cacheKey },
           response: { url: config.url, method: config.method },
         };
@@ -289,8 +491,14 @@ class PipelineManager {
     const stream = this.normalizeStream(response);
     if (!stream) {
       const buffer = Buffer.from(await response.arrayBuffer());
+      const captured = await this.captureStreamToArtifact(
+        Readable.from(buffer),
+        trace,
+        { prefix: 'http-body' }
+      );
       return {
-        stream: Readable.from(buffer),
+        stream: captured.stream,
+        artifact: captured.artifact,
         cache: { hit: false, key: cacheKey },
         response: { url: config.url, method: config.method, status: response.status },
       };
@@ -312,15 +520,24 @@ class PipelineManager {
 
       await this.auditStage('http_cache_store', trace, { url: config.url, cache_key: cacheKey });
 
+      const captured = await this.captureStreamToArtifact(
+        createReadStream(this.cacheService.dataPath(cacheKey)),
+        trace,
+        { prefix: 'http-body' }
+      );
       return {
-        stream: createReadStream(this.cacheService.dataPath(cacheKey)),
+        stream: captured.stream,
+        artifact: captured.artifact,
         cache: { hit: false, key: cacheKey },
         response: { url: config.url, method: config.method, status: response.status },
       };
     }
 
+    const captured = await this.captureStreamToArtifact(stream, trace, { prefix: 'http-body' });
+
     return {
-      stream,
+      stream: captured.stream,
+      artifact: captured.artifact,
       cache: cachePolicy.enabled ? { hit: false, key: cacheKey } : undefined,
       response: { url: config.url, method: config.method, status: response.status },
     };
@@ -362,16 +579,25 @@ class PipelineManager {
   async httpToSftp(args) {
     const hydrated = await this.hydrateProjectDefaults(args);
     const trace = this.buildTrace(hydrated);
-    const { stream, cache, response } = await this.openHttpStream(hydrated.http, hydrated.cache, trace);
+    const { stream, cache, response, artifact } = await this.openHttpStream(hydrated.http, hydrated.cache, trace);
 
     await this.auditStage('http_fetch', trace, { url: response.url, method: response.method, cache });
     const result = await this.uploadStreamToSftp(stream, hydrated.sftp || {});
     await this.auditStage('sftp_upload', trace, { remote_path: result.remote_path });
 
+    const bodyArtifact = artifact?.done ? await artifact.done : null;
+    const httpResponse = bodyArtifact
+      ? {
+        ...response,
+        body_ref: { uri: bodyArtifact.uri, rel: bodyArtifact.rel, bytes: bodyArtifact.bytes },
+        body_ref_truncated: bodyArtifact.truncated,
+      }
+      : response;
+
     return {
       success: true,
       flow: 'http_to_sftp',
-      http: response,
+      http: httpResponse,
       sftp: result,
       cache,
     };
@@ -564,7 +790,7 @@ class PipelineManager {
   async httpToPostgres(args) {
     const hydrated = await this.hydrateProjectDefaults(args);
     const trace = this.buildTrace(hydrated);
-    const { stream, cache, response } = await this.openHttpStream(hydrated.http, hydrated.cache, trace);
+    const { stream, cache, response, artifact } = await this.openHttpStream(hydrated.http, hydrated.cache, trace);
 
     await this.auditStage('http_fetch', trace, { url: response.url, method: response.method, cache });
     const ingest = await this.ingestStream(stream, {
@@ -577,10 +803,19 @@ class PipelineManager {
     });
     await this.auditStage('postgres_insert', trace, { inserted: ingest.inserted, table: hydrated.postgres?.table });
 
+    const bodyArtifact = artifact?.done ? await artifact.done : null;
+    const httpResponse = bodyArtifact
+      ? {
+        ...response,
+        body_ref: { uri: bodyArtifact.uri, rel: bodyArtifact.rel, bytes: bodyArtifact.bytes },
+        body_ref_truncated: bodyArtifact.truncated,
+      }
+      : response;
+
     return {
       success: true,
       flow: 'http_to_postgres',
-      http: response,
+      http: httpResponse,
       postgres: { inserted: ingest.inserted },
       cache,
     };

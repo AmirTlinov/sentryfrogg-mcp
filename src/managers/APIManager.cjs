@@ -5,6 +5,8 @@
  */
 
 const Constants = require('../constants/Constants.cjs');
+const crypto = require('node:crypto');
+const { once } = require('node:events');
 const fs = require('fs/promises');
 const path = require('path');
 const { createWriteStream } = require('fs');
@@ -14,6 +16,11 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { getPathValue } = require('../utils/dataPath.cjs');
 const { isTruthy } = require('../utils/featureFlags.cjs');
+const {
+  resolveContextRepoRoot,
+  buildToolCallFileRef,
+  createArtifactWriteStream,
+} = require('../utils/artifacts.cjs');
 const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic.cjs');
 const { expandHomePath } = require('../utils/userPaths.cjs');
 
@@ -41,6 +48,27 @@ function readPositiveInt(value) {
     return null;
   }
   return Math.floor(numeric);
+}
+
+function resolveStreamToArtifactMode() {
+  const raw = process.env.SENTRYFROGG_API_STREAM_TO_ARTIFACT
+    || process.env.SF_API_STREAM_TO_ARTIFACT
+    || process.env.SENTRYFROGG_STREAM_TO_ARTIFACT
+    || process.env.SF_STREAM_TO_ARTIFACT;
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  const normalized = String(raw).trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'full') {
+    return 'full';
+  }
+  if (normalized === 'capped') {
+    return 'capped';
+  }
+  return isTruthy(normalized) ? 'capped' : null;
 }
 
 async function readResponseBodyBytes(response, maxCaptureBytes) {
@@ -935,7 +963,126 @@ class APIManager {
       const responseType = (args.response_type || profile.data.response_type || 'auto').toLowerCase();
 
       const maxCaptureBytes = this.resolveMaxCaptureBytes();
-      const body = await readResponseBodyBytes(response, maxCaptureBytes);
+      const streamMode = resolveStreamToArtifactMode();
+      const contextRoot = streamMode ? resolveContextRepoRoot() : null;
+      const traceId = args.trace_id || 'run';
+      const spanId = args.span_id || crypto.randomUUID();
+
+      let bodyRef = null;
+      let bodyRefTruncated = null;
+      let body;
+
+      if (
+        streamMode
+        && contextRoot
+        && response?.body
+        && typeof response.body[Symbol.asyncIterator] === 'function'
+      ) {
+        const artifactLimit = streamMode === 'full' ? Number.POSITIVE_INFINITY : maxCaptureBytes;
+        const previewChunks = [];
+        let previewCaptured = 0;
+        let previewTruncated = false;
+        let readBytes = 0;
+        let artifactWritten = 0;
+        let artifactTruncated = false;
+
+        const filename = `api-body-${crypto.randomUUID()}.bin`;
+        const ref = buildToolCallFileRef({ traceId, spanId, filename });
+
+        let writer = null;
+        try {
+          writer = await createArtifactWriteStream(contextRoot, ref);
+        } catch (artifactError) {
+          this.logger.warn('Failed to initialize API response artifact stream', { error: artifactError.message });
+        }
+
+        if (writer) {
+          let abortedEarly = false;
+          try {
+            for await (const chunk of response.body) {
+              const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? '');
+              readBytes += buf.length;
+
+              if (previewCaptured < maxCaptureBytes) {
+                const remaining = maxCaptureBytes - previewCaptured;
+                if (buf.length <= remaining) {
+                  previewChunks.push(buf);
+                  previewCaptured += buf.length;
+                } else {
+                  previewChunks.push(buf.subarray(0, remaining));
+                  previewCaptured += remaining;
+                  previewTruncated = true;
+                }
+              } else {
+                previewTruncated = true;
+              }
+
+              if (artifactWritten < artifactLimit && writer) {
+                const remaining = artifactLimit - artifactWritten;
+                const slice = buf.length <= remaining ? buf : buf.subarray(0, remaining);
+                try {
+                  const ok = writer.stream.write(slice);
+                  if (!ok) {
+                    await once(writer.stream, 'drain');
+                  }
+                } catch (writeError) {
+                  this.logger.warn('Failed to stream API response body chunk', { error: writeError.message });
+                  await writer.abort().catch(() => null);
+                  writer = null;
+                }
+                artifactWritten += slice.length;
+                if (slice.length < buf.length) {
+                  artifactTruncated = true;
+                }
+              } else if (artifactLimit !== Number.POSITIVE_INFINITY) {
+                artifactTruncated = true;
+              }
+
+              if (artifactLimit !== Number.POSITIVE_INFINITY && artifactWritten >= artifactLimit) {
+                previewTruncated = true;
+                abortedEarly = true;
+                if (typeof response.body.destroy === 'function') {
+                  response.body.destroy();
+                }
+                break;
+              }
+            }
+          } catch (error) {
+            if (!abortedEarly) {
+              await writer.abort().catch(() => null);
+              throw error;
+            }
+          }
+
+          const previewBuffer = previewCaptured
+            ? Buffer.concat(previewChunks, previewCaptured)
+            : Buffer.alloc(0);
+
+          if (writer && artifactWritten > 0) {
+            try {
+              const written = await writer.finalize();
+              bodyRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
+              bodyRefTruncated = artifactTruncated;
+            } catch (artifactError) {
+              this.logger.warn('Failed to finalize API response artifact', { error: artifactError.message });
+              await writer.abort().catch(() => null);
+            }
+          } else if (writer) {
+            await writer.abort().catch(() => null);
+          }
+
+          body = {
+            buffer: previewBuffer,
+            body_read_bytes: readBytes,
+            body_captured_bytes: previewBuffer.length,
+            body_truncated: previewTruncated,
+          };
+        } else {
+          body = await readResponseBodyBytes(response, maxCaptureBytes);
+        }
+      } else {
+        body = await readResponseBodyBytes(response, maxCaptureBytes);
+      }
 
       let data;
       let bodyBase64;
@@ -982,6 +1129,8 @@ class APIManager {
         body_read_bytes: body.body_read_bytes,
         body_captured_bytes: body.body_captured_bytes,
         body_truncated: body.body_truncated,
+        body_ref: bodyRef,
+        body_ref_truncated: bodyRefTruncated,
       };
     } finally {
       if (timeout) {

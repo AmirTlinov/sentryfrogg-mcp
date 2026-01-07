@@ -14,6 +14,7 @@ const { expandHomePath } = require('../utils/userPaths.cjs');
 const {
   resolveContextRepoRoot,
   buildToolCallFileRef,
+  createArtifactWriteStream,
   writeBinaryArtifact,
 } = require('../utils/artifacts.cjs');
 
@@ -85,6 +86,31 @@ function readPositiveInt(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveStreamToArtifactMode() {
+  const raw = process.env.SENTRYFROGG_SSH_STREAM_TO_ARTIFACT
+    || process.env.SF_SSH_STREAM_TO_ARTIFACT
+    || process.env.SENTRYFROGG_STREAM_TO_ARTIFACT
+    || process.env.SF_STREAM_TO_ARTIFACT;
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  const normalized = String(raw).trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'full') {
+    return 'full';
+  }
+  if (normalized === 'capped') {
+    return 'capped';
+  }
+  return isTruthy(normalized) ? 'capped' : null;
+}
+
+function isStreamToArtifactEnabled() {
+  return Boolean(resolveStreamToArtifactMode());
 }
 
 function normalizePublicKeyLine(raw) {
@@ -987,6 +1013,8 @@ class SSHManager {
     const traceId = args.trace_id || 'run';
     const spanId = args.span_id || crypto.randomUUID();
     const contextRoot = resolveContextRepoRoot();
+    const streamArtifactsMode = contextRoot ? resolveStreamToArtifactMode() : null;
+    const streamArtifactsRequested = Boolean(streamArtifactsMode);
 
     return new Promise((resolve, reject) => {
       const started = Date.now();
@@ -994,10 +1022,18 @@ class SSHManager {
       const stderrState = { total: 0, captured: 0, truncated: false };
       const stdoutChunks = [];
       const stderrChunks = [];
+      const stdoutInline = { captured: 0, truncated: false };
+      const stderrInline = { captured: 0, truncated: false };
       let timedOut = false;
       let settled = false;
 
-      const captureChunk = (chunk, state, target) => {
+      let streamArtifactsEnabled = streamArtifactsRequested;
+      let stdoutWriter = null;
+      let stderrWriter = null;
+
+      const artifactLimit = streamArtifactsMode === 'full' ? Number.POSITIVE_INFINITY : maxCaptureBytes;
+
+      const captureMemoryChunk = (chunk, state, target) => {
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ''));
         state.total += buf.length;
         if (state.captured >= maxCaptureBytes) {
@@ -1015,95 +1051,245 @@ class SSHManager {
         state.truncated = true;
       };
 
-      client.exec(command, options, (error, stream) => {
-        if (error) {
-          reject(error);
+      const captureInlineChunk = (chunk, inlineState, target) => {
+        if (inlineState.captured >= maxInlineBytes) {
+          inlineState.truncated = true;
           return;
         }
 
-        const finalize = (fn) => {
-          if (settled) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ''));
+        const remaining = maxInlineBytes - inlineState.captured;
+        if (buf.length <= remaining) {
+          target.push(buf);
+          inlineState.captured += buf.length;
+          return;
+        }
+        target.push(buf.subarray(0, remaining));
+        inlineState.captured += remaining;
+        inlineState.truncated = true;
+      };
+
+      const writeArtifactChunk = (chunk, state, writer, source) => {
+        if (!writer) {
+          if (artifactLimit !== Number.POSITIVE_INFINITY) {
+            state.truncated = true;
+          }
+          return;
+        }
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ''));
+        if (state.captured >= artifactLimit) {
+          if (artifactLimit !== Number.POSITIVE_INFINITY) {
+            state.truncated = true;
+          }
+          return;
+        }
+        const remaining = artifactLimit - state.captured;
+        if (buf.length <= remaining) {
+          const ok = writer.stream.write(buf);
+          if (!ok && source && typeof source.pause === 'function') {
+            source.pause();
+            writer.stream.once('drain', () => source.resume());
+          }
+          state.captured += buf.length;
+          return;
+        }
+        const slice = buf.subarray(0, remaining);
+        const ok = writer.stream.write(slice);
+        if (!ok && source && typeof source.pause === 'function') {
+          source.pause();
+          writer.stream.once('drain', () => source.resume());
+        }
+        state.captured += remaining;
+        state.truncated = true;
+      };
+
+      const startExec = async () => {
+        if (streamArtifactsEnabled) {
+          try {
+            stdoutWriter = await createArtifactWriteStream(
+              contextRoot,
+              buildToolCallFileRef({ traceId, spanId, filename: 'stdout.log' })
+            );
+            stderrWriter = await createArtifactWriteStream(
+              contextRoot,
+              buildToolCallFileRef({ traceId, spanId, filename: 'stderr.log' })
+            );
+          } catch (artifactError) {
+            streamArtifactsEnabled = false;
+            if (stdoutWriter) {
+              await stdoutWriter.abort().catch(() => null);
+              stdoutWriter = null;
+            }
+            if (stderrWriter) {
+              await stderrWriter.abort().catch(() => null);
+              stderrWriter = null;
+            }
+            this.logger.warn('Failed to initialize SSH artifact streams', { error: artifactError.message });
+          }
+        }
+
+        client.exec(command, options, (error, stream) => {
+          if (error) {
+            if (stdoutWriter) {
+              void stdoutWriter.abort().catch(() => null);
+              stdoutWriter = null;
+            }
+            if (stderrWriter) {
+              void stderrWriter.abort().catch(() => null);
+              stderrWriter = null;
+            }
+            reject(error);
             return;
           }
-          settled = true;
-          Promise.resolve()
-            .then(fn)
-            .then((value) => resolve(value))
-            .catch((err) => reject(err));
-        };
 
-        const buildResult = async ({ exitCode, signal, hardTimedOut = false }) => {
-          const stdoutBuffer = stdoutState.captured
-            ? Buffer.concat(stdoutChunks, stdoutState.captured)
-            : Buffer.alloc(0);
-          const stderrBuffer = stderrState.captured
-            ? Buffer.concat(stderrChunks, stderrState.captured)
-            : Buffer.alloc(0);
-
-          const stdoutInlineBuffer = stdoutBuffer.length > maxInlineBytes
-            ? stdoutBuffer.subarray(0, maxInlineBytes)
-            : stdoutBuffer;
-          const stderrInlineBuffer = stderrBuffer.length > maxInlineBytes
-            ? stderrBuffer.subarray(0, maxInlineBytes)
-            : stderrBuffer;
-
-          const stdoutInlineTruncated = stdoutBuffer.length > maxInlineBytes;
-          const stderrInlineTruncated = stderrBuffer.length > maxInlineBytes;
-
-          const shouldWriteStdout = Boolean(
-            contextRoot
-            && stdoutBuffer.length > 0
-            && (stdoutState.truncated || stdoutInlineTruncated)
-          );
-          const shouldWriteStderr = Boolean(
-            contextRoot
-            && stderrBuffer.length > 0
-            && (stderrState.truncated || stderrInlineTruncated)
-          );
-
-          let stdoutRef = null;
-          let stderrRef = null;
-
-          if (shouldWriteStdout) {
-            try {
-              const ref = buildToolCallFileRef({ traceId, spanId, filename: 'stdout.log' });
-              const written = await writeBinaryArtifact(contextRoot, ref, stdoutBuffer);
-              stdoutRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
-            } catch (artifactError) {
-              this.logger.warn('Failed to write SSH stdout artifact', { error: artifactError.message });
+          const finalize = (fn) => {
+            if (settled) {
+              return;
             }
-          }
-
-          if (shouldWriteStderr) {
-            try {
-              const ref = buildToolCallFileRef({ traceId, spanId, filename: 'stderr.log' });
-              const written = await writeBinaryArtifact(contextRoot, ref, stderrBuffer);
-              stderrRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
-            } catch (artifactError) {
-              this.logger.warn('Failed to write SSH stderr artifact', { error: artifactError.message });
-            }
-          }
-
-          return {
-            stdout: stdoutInlineBuffer.toString('utf8').trim(),
-            stderr: stderrInlineBuffer.toString('utf8').trim(),
-            stdout_bytes: stdoutState.total,
-            stderr_bytes: stderrState.total,
-            stdout_captured_bytes: stdoutBuffer.length,
-            stderr_captured_bytes: stderrBuffer.length,
-            stdout_truncated: stdoutState.truncated,
-            stderr_truncated: stderrState.truncated,
-            stdout_inline_truncated: stdoutInlineTruncated,
-            stderr_inline_truncated: stderrInlineTruncated,
-            stdout_ref: stdoutRef,
-            stderr_ref: stderrRef,
-            exitCode,
-            signal,
-            timedOut,
-            hardTimedOut,
-            duration_ms: Date.now() - started,
+            settled = true;
+            Promise.resolve()
+              .then(fn)
+              .then((value) => resolve(value))
+              .catch((err) => reject(err));
           };
-        };
+
+          const buildResult = async ({ exitCode, signal, hardTimedOut = false }) => {
+            if (streamArtifactsEnabled) {
+              const stdoutInlineBuffer = stdoutInline.captured
+                ? Buffer.concat(stdoutChunks, stdoutInline.captured)
+                : Buffer.alloc(0);
+              const stderrInlineBuffer = stderrInline.captured
+                ? Buffer.concat(stderrChunks, stderrInline.captured)
+                : Buffer.alloc(0);
+
+              const stdoutInlineTruncated = stdoutInline.truncated;
+              const stderrInlineTruncated = stderrInline.truncated;
+
+              let stdoutRef = null;
+              let stderrRef = null;
+
+              if (stdoutWriter) {
+                if (stdoutState.captured > 0) {
+                  try {
+                    const written = await stdoutWriter.finalize();
+                    stdoutRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
+                  } catch (artifactError) {
+                    this.logger.warn('Failed to finalize SSH stdout artifact', { error: artifactError.message });
+                    await stdoutWriter.abort().catch(() => null);
+                  }
+                } else {
+                  await stdoutWriter.abort().catch(() => null);
+                }
+                stdoutWriter = null;
+              }
+
+              if (stderrWriter) {
+                if (stderrState.captured > 0) {
+                  try {
+                    const written = await stderrWriter.finalize();
+                    stderrRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
+                  } catch (artifactError) {
+                    this.logger.warn('Failed to finalize SSH stderr artifact', { error: artifactError.message });
+                    await stderrWriter.abort().catch(() => null);
+                  }
+                } else {
+                  await stderrWriter.abort().catch(() => null);
+                }
+                stderrWriter = null;
+              }
+
+              return {
+                stdout: stdoutInlineBuffer.toString('utf8').trim(),
+                stderr: stderrInlineBuffer.toString('utf8').trim(),
+                stdout_bytes: stdoutState.total,
+                stderr_bytes: stderrState.total,
+                stdout_captured_bytes: stdoutState.captured,
+                stderr_captured_bytes: stderrState.captured,
+                stdout_truncated: stdoutState.truncated,
+                stderr_truncated: stderrState.truncated,
+                stdout_inline_truncated: stdoutInlineTruncated,
+                stderr_inline_truncated: stderrInlineTruncated,
+                stdout_ref: stdoutRef,
+                stderr_ref: stderrRef,
+                exitCode,
+                signal,
+                timedOut,
+                hardTimedOut,
+                duration_ms: Date.now() - started,
+              };
+            }
+
+            const stdoutBuffer = stdoutState.captured
+              ? Buffer.concat(stdoutChunks, stdoutState.captured)
+              : Buffer.alloc(0);
+            const stderrBuffer = stderrState.captured
+              ? Buffer.concat(stderrChunks, stderrState.captured)
+              : Buffer.alloc(0);
+
+            const stdoutInlineBuffer = stdoutBuffer.length > maxInlineBytes
+              ? stdoutBuffer.subarray(0, maxInlineBytes)
+              : stdoutBuffer;
+            const stderrInlineBuffer = stderrBuffer.length > maxInlineBytes
+              ? stderrBuffer.subarray(0, maxInlineBytes)
+              : stderrBuffer;
+
+            const stdoutInlineTruncated = stdoutBuffer.length > maxInlineBytes;
+            const stderrInlineTruncated = stderrBuffer.length > maxInlineBytes;
+
+            const shouldWriteStdout = Boolean(
+              contextRoot
+              && stdoutBuffer.length > 0
+              && (stdoutState.truncated || stdoutInlineTruncated)
+            );
+            const shouldWriteStderr = Boolean(
+              contextRoot
+              && stderrBuffer.length > 0
+              && (stderrState.truncated || stderrInlineTruncated)
+            );
+
+            let stdoutRef = null;
+            let stderrRef = null;
+
+            if (shouldWriteStdout) {
+              try {
+                const ref = buildToolCallFileRef({ traceId, spanId, filename: 'stdout.log' });
+                const written = await writeBinaryArtifact(contextRoot, ref, stdoutBuffer);
+                stdoutRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
+              } catch (artifactError) {
+                this.logger.warn('Failed to write SSH stdout artifact', { error: artifactError.message });
+              }
+            }
+
+            if (shouldWriteStderr) {
+              try {
+                const ref = buildToolCallFileRef({ traceId, spanId, filename: 'stderr.log' });
+                const written = await writeBinaryArtifact(contextRoot, ref, stderrBuffer);
+                stderrRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
+              } catch (artifactError) {
+                this.logger.warn('Failed to write SSH stderr artifact', { error: artifactError.message });
+              }
+            }
+
+            return {
+              stdout: stdoutInlineBuffer.toString('utf8').trim(),
+              stderr: stderrInlineBuffer.toString('utf8').trim(),
+              stdout_bytes: stdoutState.total,
+              stderr_bytes: stderrState.total,
+              stdout_captured_bytes: stdoutBuffer.length,
+              stderr_captured_bytes: stderrBuffer.length,
+              stdout_truncated: stdoutState.truncated,
+              stderr_truncated: stderrState.truncated,
+              stdout_inline_truncated: stdoutInlineTruncated,
+              stderr_inline_truncated: stderrInlineTruncated,
+              stdout_ref: stdoutRef,
+              stderr_ref: stderrRef,
+              exitCode,
+              signal,
+              timedOut,
+              hardTimedOut,
+              duration_ms: Date.now() - started,
+            };
+          };
 
         let timeout;
         let hardTimeout;
@@ -1159,17 +1345,39 @@ class SSHManager {
             if (hardTimeout) {
               clearTimeout(hardTimeout);
             }
-            finalize(() => {
+            finalize(async () => {
+              if (stdoutWriter) {
+                await stdoutWriter.abort().catch(() => null);
+                stdoutWriter = null;
+              }
+              if (stderrWriter) {
+                await stderrWriter.abort().catch(() => null);
+                stderrWriter = null;
+              }
               throw streamError;
             });
           })
           .on('data', (data) => {
-            captureChunk(data, stdoutState, stdoutChunks);
+            if (streamArtifactsEnabled) {
+              const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data ?? ''));
+              stdoutState.total += buf.length;
+              captureInlineChunk(buf, stdoutInline, stdoutChunks);
+              writeArtifactChunk(buf, stdoutState, stdoutWriter, stream);
+              return;
+            }
+            captureMemoryChunk(data, stdoutState, stdoutChunks);
           });
 
         if (stream.stderr && typeof stream.stderr.on === 'function') {
           stream.stderr.on('data', (data) => {
-            captureChunk(data, stderrState, stderrChunks);
+            if (streamArtifactsEnabled) {
+              const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data ?? ''));
+              stderrState.total += buf.length;
+              captureInlineChunk(buf, stderrInline, stderrChunks);
+              writeArtifactChunk(buf, stderrState, stderrWriter, stream.stderr);
+              return;
+            }
+            captureMemoryChunk(data, stderrState, stderrChunks);
           });
         }
 
@@ -1177,6 +1385,9 @@ class SSHManager {
           stream.end(String(stdin));
         }
       });
+      };
+
+      void startExec().catch(reject);
     });
   }
 

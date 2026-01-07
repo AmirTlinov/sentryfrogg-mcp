@@ -138,6 +138,78 @@ async function writeBinaryArtifact(contextRoot, ref, buffer, options = {}) {
   };
 }
 
+async function createArtifactWriteStream(contextRoot, ref, options = {}) {
+  if (!ref || typeof ref !== 'object') {
+    throw new Error('artifact ref is required');
+  }
+
+  const mode = options.mode ?? DEFAULT_FILE_MODE;
+  const filePath = resolveArtifactPath(contextRoot, ref.rel);
+  const tmpPath = tempSiblingPath(filePath);
+  await ensureDirForFile(filePath);
+
+  const stream = fs.createWriteStream(tmpPath, { mode });
+  const closePromise = once(stream, 'close').catch(() => null);
+  let streamError = null;
+  stream.on('error', (error) => {
+    streamError = error;
+  });
+
+  let finished = false;
+  let aborted = false;
+
+  const finalize = async () => {
+    if (aborted) {
+      throw new Error('artifact stream was aborted');
+    }
+    if (!finished) {
+      finished = true;
+      if (!stream.destroyed && !stream.writableEnded) {
+        stream.end();
+      }
+    }
+    await closePromise;
+    if (streamError) {
+      await fsp.unlink(tmpPath).catch(() => null);
+      throw streamError;
+    }
+
+    try {
+      await atomicReplaceFile(tmpPath, filePath, { overwrite: true, mode });
+      const stat = await fsp.stat(filePath);
+      return {
+        uri: ref.uri,
+        rel: ref.rel,
+        path: filePath,
+        bytes: stat.size,
+      };
+    } catch (error) {
+      await fsp.unlink(tmpPath).catch(() => null);
+      throw error;
+    }
+  };
+
+  const abort = async () => {
+    if (aborted) {
+      return;
+    }
+    aborted = true;
+    stream.destroy();
+    await closePromise;
+    await fsp.unlink(tmpPath).catch(() => null);
+  };
+
+  return {
+    uri: ref.uri,
+    rel: ref.rel,
+    path: filePath,
+    tmp_path: tmpPath,
+    stream,
+    finalize,
+    abort,
+  };
+}
+
 async function copyFileArtifact(contextRoot, ref, sourcePath, options = {}) {
   if (!ref || typeof ref !== 'object') {
     throw new Error('artifact ref is required');
@@ -234,5 +306,6 @@ module.exports = {
   resolveArtifactPath,
   writeTextArtifact,
   writeBinaryArtifact,
+  createArtifactWriteStream,
   copyFileArtifact,
 };
