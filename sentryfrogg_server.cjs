@@ -36,6 +36,7 @@ const HELP_TOOL_ALIASES = {
   psql: 'mcp_psql_manager',
   ssh: 'mcp_ssh_manager',
   job: 'mcp_jobs',
+  artifacts: 'mcp_artifacts',
   http: 'mcp_api_client',
   api: 'mcp_api_client',
   repo: 'mcp_repo',
@@ -55,6 +56,29 @@ const HELP_TOOL_ALIASES = {
   pipeline: 'mcp_pipeline',
   local: 'mcp_local',
 };
+
+const CORE_TOOL_NAMES = new Set([
+  'help',
+  'legend',
+  'mcp_workspace',
+  'mcp_jobs',
+  'mcp_artifacts',
+  'mcp_project',
+]);
+
+function resolveToolTier() {
+  const raw = String(process.env.SENTRYFROGG_TOOL_TIER || process.env.SF_TOOL_TIER || 'full')
+    .trim()
+    .toLowerCase();
+  return raw === 'core' ? 'core' : 'full';
+}
+
+function filterToolCatalogForTier(tools, tier) {
+  if (tier !== 'core') {
+    return tools;
+  }
+  return tools.filter((tool) => CORE_TOOL_NAMES.has(tool.name));
+}
 
 const outputSchema = {
   type: 'object',
@@ -153,6 +177,33 @@ const toolCatalog = [
         signal: { type: 'string' },
         limit: { type: 'integer' },
         status: { type: 'string', enum: ['queued', 'running', 'succeeded', 'failed', 'canceled'] },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'mcp_artifacts',
+    description: 'Artifacts: read/list artifact:// refs (bounded by default).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['get', 'head', 'tail', 'list'] },
+        uri: { type: 'string' },
+        rel: { type: 'string' },
+        prefix: { type: 'string' },
+        encoding: { type: 'string', enum: ['utf8', 'base64'] },
+        offset: { type: 'integer' },
+        max_bytes: { type: 'integer' },
+        limit: { type: 'integer' },
         output: outputSchema,
         store_as: { type: ['string', 'object'] },
         store_scope: { type: 'string', enum: ['session', 'persistent'] },
@@ -853,6 +904,8 @@ toolCatalog.push(
   { name: 'sql', description: 'Alias for mcp_psql_manager.', inputSchema: toolByName.mcp_psql_manager.inputSchema },
   { name: 'psql', description: 'Alias for mcp_psql_manager.', inputSchema: toolByName.mcp_psql_manager.inputSchema },
   { name: 'ssh', description: 'Alias for mcp_ssh_manager.', inputSchema: toolByName.mcp_ssh_manager.inputSchema },
+  { name: 'job', description: 'Alias for mcp_jobs.', inputSchema: toolByName.mcp_jobs.inputSchema },
+  { name: 'artifacts', description: 'Alias for mcp_artifacts.', inputSchema: toolByName.mcp_artifacts.inputSchema },
   { name: 'http', description: 'Alias for mcp_api_client.', inputSchema: toolByName.mcp_api_client.inputSchema },
   { name: 'api', description: 'Alias for mcp_api_client.', inputSchema: toolByName.mcp_api_client.inputSchema },
   { name: 'repo', description: 'Alias for mcp_repo.', inputSchema: toolByName.mcp_repo.inputSchema },
@@ -1491,7 +1544,11 @@ class SentryFroggServer {
   }
 
   async setupHandlers() {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolCatalog.map(normalizeToolForOpenAI) }));
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const tier = resolveToolTier();
+      const visible = filterToolCatalogForTier(toolCatalog, tier);
+      return { tools: visible.map(normalizeToolForOpenAI) };
+    });
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
@@ -1795,6 +1852,7 @@ class SentryFroggServer {
 
     const tool = rawTool ? (HELP_TOOL_ALIASES[rawTool] || rawTool) : '';
     const action = rawAction || '';
+    const tier = resolveToolTier();
 
     const extractActions = (toolName) => {
       const schema = toolByName[toolName]?.inputSchema;
@@ -2039,6 +2097,14 @@ class SentryFroggServer {
         description: 'Workspace: сводка, подсказки, диагностика и перенос legacy-хранилища.',
         usage: 'summary/suggest → run → cleanup → diagnose → store_status/migrate_legacy',
       },
+      mcp_jobs: {
+        description: 'Jobs: единый реестр async задач (status/wait/logs/cancel/list).',
+        usage: 'job_status/job_wait/job_logs_tail/job_cancel/job_forget/job_list',
+      },
+      mcp_artifacts: {
+        description: 'Artifacts: чтение и листинг artifact:// refs (bounded по умолчанию).',
+        usage: 'get/head/tail/list',
+      },
       mcp_env: {
         description: 'Env: зашифрованные env-бандлы и безопасная запись/запуск на серверах по SSH.',
         usage: 'profile_upsert/profile_list → write_remote/run_remote',
@@ -2135,16 +2201,24 @@ class SentryFroggServer {
       };
     }
 
-    return {
-      overview: isUnsafeLocalEnabled()
+    const visibleSummaries = tier === 'core'
+      ? Object.fromEntries(Object.entries(summaries).filter(([key]) => CORE_TOOL_NAMES.has(key)))
+      : summaries;
+
+    const overview = tier === 'core'
+      ? 'SentryFrogg MCP (tool_tier=core): используйте workspace/jobs/artifacts (и project опционально); остальные инструменты скрыты из tools/list, но доступны при явном вызове.'
+      : (isUnsafeLocalEnabled()
         ? 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, project, context, runbook, capability/intent/evidence, alias, preset, audit, pipeline и (unsafe) local инструменты.'
-        : 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, project, context, runbook, capability/intent/evidence, alias, preset, audit и pipeline инструменты.',
+        : 'SentryFrogg MCP подключает PostgreSQL, SSH, HTTP, state, project, context, runbook, capability/intent/evidence, alias, preset, audit и pipeline инструменты.');
+
+    return {
+      overview,
       usage: "help({ tool: 'mcp_ssh_manager' }) или help({ tool: 'mcp_ssh_manager', action: 'exec' })",
       legend: {
         hint: "Вся семантика общих полей и правил resolution — в `legend()` (или `help({ tool: 'legend' })`).",
         includes: ['common_fields', 'resolution', 'refs', 'safety', 'golden_path'],
       },
-      tools: Object.entries(summaries).map(([key, value]) => ({
+      tools: Object.entries(visibleSummaries).map(([key, value]) => ({
         name: key,
         description: value.description,
         usage: value.usage,

@@ -358,6 +358,7 @@ class ServiceBootstrap {
     const APIManager = require('../managers/APIManager.cjs');
     const LocalManager = require('../managers/LocalManager.cjs');
     const RepoManager = require('../managers/RepoManager.cjs');
+    const ArtifactManager = require('../managers/ArtifactManager.cjs');
     const StateManager = require('../managers/StateManager.cjs');
     const ProjectManager = require('../managers/ProjectManager.cjs');
     const EnvManager = require('../managers/EnvManager.cjs');
@@ -425,6 +426,14 @@ class ServiceBootstrap {
       dependencies: ['logger', 'security', 'validation', 'projectResolver', 'policyService'],
     });
 
+    // Artifact Manager
+    this.container.register('artifactManager',
+      (logger, validation) =>
+        new ArtifactManager(logger, validation), {
+      singleton: true,
+      dependencies: ['logger', 'validation'],
+    });
+
     // State Manager
     this.container.register('stateManager',
       (logger, stateService) =>
@@ -483,13 +492,14 @@ class ServiceBootstrap {
 
     // Tool executor
     this.container.register('toolExecutor',
-      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, jobManager, apiManager, repoManager, stateManager, projectManager, envManager, vaultManager, contextManager, capabilityManager, evidenceManager, aliasManager, presetManager, auditManager, pipelineManager) =>
+      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, jobManager, apiManager, repoManager, artifactManager, stateManager, projectManager, envManager, vaultManager, contextManager, capabilityManager, evidenceManager, aliasManager, presetManager, auditManager, pipelineManager) =>
         new ToolExecutor(logger, stateService, aliasService, presetService, auditService, {
           mcp_psql_manager: (args) => postgresqlManager.handleAction(args),
           mcp_ssh_manager: (args) => sshManager.handleAction(args),
           mcp_jobs: (args) => jobManager.handleAction(args),
           mcp_api_client: (args) => apiManager.handleAction(args),
           mcp_repo: (args) => repoManager.handleAction(args),
+          mcp_artifacts: (args) => artifactManager.handleAction(args),
           mcp_state: (args) => stateManager.handleAction(args),
           mcp_project: (args) => projectManager.handleAction(args),
           mcp_env: (args) => envManager.handleAction(args),
@@ -510,6 +520,7 @@ class ServiceBootstrap {
             http: 'mcp_api_client',
             api: 'mcp_api_client',
             repo: 'mcp_repo',
+            artifacts: 'mcp_artifacts',
             state: 'mcp_state',
             project: 'mcp_project',
             env: 'mcp_env',
@@ -536,6 +547,7 @@ class ServiceBootstrap {
         'jobManager',
         'apiManager',
         'repoManager',
+        'artifactManager',
         'stateManager',
         'projectManager',
         'envManager',
