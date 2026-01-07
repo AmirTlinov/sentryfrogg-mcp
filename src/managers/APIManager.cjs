@@ -19,6 +19,8 @@ const { expandHomePath } = require('../utils/userPaths.cjs');
 
 const execFileAsync = promisify(execFile);
 
+const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
+
 let fetchPromise = null;
 async function fetchFn(...args) {
   if (!fetchPromise) {
@@ -29,6 +31,118 @@ async function fetchFn(...args) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function readPositiveInt(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return Math.floor(numeric);
+}
+
+async function readResponseBodyBytes(response, maxCaptureBytes) {
+  const limit = Number.isFinite(maxCaptureBytes) && maxCaptureBytes > 0
+    ? maxCaptureBytes
+    : DEFAULT_MAX_CAPTURE_BYTES;
+
+  const body = response?.body;
+  if (body && typeof body[Symbol.asyncIterator] === 'function') {
+    const chunks = [];
+    let readBytes = 0;
+    let captured = 0;
+    let truncated = false;
+
+    try {
+      for await (const chunk of body) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? '');
+        readBytes += buf.length;
+
+        if (captured < limit) {
+          const remaining = limit - captured;
+          if (buf.length <= remaining) {
+            chunks.push(buf);
+            captured += buf.length;
+          } else {
+            chunks.push(buf.subarray(0, remaining));
+            captured += remaining;
+            truncated = true;
+          }
+        } else {
+          truncated = true;
+        }
+
+        if (captured >= limit) {
+          truncated = true;
+          if (typeof body.destroy === 'function') {
+            body.destroy();
+          }
+          break;
+        }
+      }
+    } catch (error) {
+      if (!truncated) {
+        throw error;
+      }
+    }
+
+    const buffer = captured ? Buffer.concat(chunks, captured) : Buffer.alloc(0);
+    return {
+      buffer,
+      body_read_bytes: readBytes,
+      body_captured_bytes: buffer.length,
+      body_truncated: truncated,
+    };
+  }
+
+  if (typeof response?.arrayBuffer === 'function') {
+    const full = Buffer.from(await response.arrayBuffer());
+    const truncated = full.length > limit;
+    const buffer = truncated ? full.subarray(0, limit) : full;
+    return {
+      buffer,
+      body_read_bytes: full.length,
+      body_captured_bytes: buffer.length,
+      body_truncated: truncated,
+    };
+  }
+
+  if (typeof response?.text === 'function') {
+    const text = await response.text();
+    const full = Buffer.from(text, 'utf8');
+    const truncated = full.length > limit;
+    const buffer = truncated ? full.subarray(0, limit) : full;
+    return {
+      buffer,
+      body_read_bytes: full.length,
+      body_captured_bytes: buffer.length,
+      body_truncated: truncated,
+    };
+  }
+
+  if (typeof response?.json === 'function') {
+    const payload = await response.json();
+    const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const full = Buffer.from(text, 'utf8');
+    const truncated = full.length > limit;
+    const buffer = truncated ? full.subarray(0, limit) : full;
+    return {
+      buffer,
+      body_read_bytes: full.length,
+      body_captured_bytes: buffer.length,
+      body_truncated: truncated,
+    };
+  }
+
+  return {
+    buffer: Buffer.alloc(0),
+    body_read_bytes: 0,
+    body_captured_bytes: 0,
+    body_truncated: false,
+  };
+}
 
 function parseRetryAfter(value) {
   if (!value) {
@@ -107,6 +221,16 @@ class APIManager {
       downloads: 0,
       pages: 0,
     };
+  }
+
+  resolveMaxCaptureBytes() {
+    const fromEnv = readPositiveInt(
+      process.env.SENTRYFROGG_API_MAX_CAPTURE_BYTES
+      || process.env.SF_API_MAX_CAPTURE_BYTES
+      || process.env.SENTRYFROGG_MAX_CAPTURE_BYTES
+      || process.env.SF_MAX_CAPTURE_BYTES
+    );
+    return fromEnv ?? DEFAULT_MAX_CAPTURE_BYTES;
   }
 
   async handleAction(args) {
@@ -810,24 +934,35 @@ class APIManager {
       const contentType = response.headers.get('content-type') || '';
       const responseType = (args.response_type || profile.data.response_type || 'auto').toLowerCase();
 
+      const maxCaptureBytes = this.resolveMaxCaptureBytes();
+      const body = await readResponseBodyBytes(response, maxCaptureBytes);
+
       let data;
       let bodyBase64;
       let bodyBytes;
+      let dataTruncated;
 
       if (responseType === 'bytes') {
-        const buffer = Buffer.from(await response.arrayBuffer());
-        bodyBase64 = buffer.toString('base64');
-        bodyBytes = buffer.length;
+        bodyBase64 = body.buffer.toString('base64');
+        bodyBytes = body.buffer.length;
       } else if (responseType === 'text') {
-        data = await response.text();
+        data = body.buffer.toString('utf8');
+        dataTruncated = body.body_truncated;
       } else if (responseType === 'json' || contentType.includes('application/json')) {
-        try {
-          data = await response.json();
-        } catch (error) {
-          data = await response.text();
+        const text = body.buffer.toString('utf8');
+        if (!body.body_truncated) {
+          try {
+            data = JSON.parse(text);
+          } catch (error) {
+            data = text;
+          }
+        } else {
+          data = text;
         }
+        dataTruncated = body.body_truncated;
       } else {
-        data = await response.text();
+        data = body.buffer.toString('utf8');
+        dataTruncated = body.body_truncated;
       }
 
       this.stats.requests += 1;
@@ -841,8 +976,12 @@ class APIManager {
         headers: Object.fromEntries(response.headers.entries()),
         duration_ms: Date.now() - started,
         data,
+        data_truncated: dataTruncated,
         body_base64: bodyBase64,
         body_bytes: bodyBytes,
+        body_read_bytes: body.body_read_bytes,
+        body_captured_bytes: body.body_captured_bytes,
+        body_truncated: body.body_truncated,
       };
     } finally {
       if (timeout) {

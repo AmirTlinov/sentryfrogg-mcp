@@ -8,6 +8,8 @@ const SECRET_FIELD_PATTERN = /(key|token|secret|pass|pwd)/i;
 const crypto = require('crypto');
 const { matchesWhen } = require('../utils/whenMatcher.cjs');
 
+const ToolError = require('../errors/ToolError.cjs');
+
 function getByPath(source, path) {
   if (!path) {
     return undefined;
@@ -123,7 +125,11 @@ class IntentManager {
       case 'explain':
         return this.explain(args);
       default:
-        throw new Error(`Unknown intent action: ${action}`);
+        throw ToolError.invalidParams({
+          message: `Unknown intent action: ${action}`,
+          field: 'action',
+          hint: 'Use one of: compile, dry_run, execute, explain.',
+        });
     }
   }
 
@@ -148,7 +154,12 @@ class IntentManager {
   async execute(args, { dryRun }) {
     const { plan, missing } = await this.buildPlan(args, { allowMissing: false });
     if (missing.length > 0) {
-      throw new Error(`Missing required inputs: ${missing.join(', ')}`);
+      throw ToolError.invalidParams({
+        code: 'MISSING_INPUTS',
+        message: `Missing required inputs: ${missing.join(', ')}`,
+        hint: 'Provide the missing intent inputs and retry.',
+        details: { missing },
+      });
     }
 
     if (dryRun) {
@@ -168,7 +179,11 @@ class IntentManager {
     const traceId = args.trace_id || crypto.randomUUID();
     const apply = Boolean(args.apply || plan.intent.apply);
     if (plan.effects.requires_apply && !apply) {
-      throw new Error('Intent requires apply=true for write/mixed effects');
+      throw ToolError.denied({
+        code: 'APPLY_REQUIRED',
+        message: 'Intent requires apply=true for write/mixed effects',
+        hint: 'Rerun with apply=true if you intend to perform write operations.',
+      });
     }
 
     const isGitOpsWrite = apply
@@ -191,7 +206,11 @@ class IntentManager {
         repoRoot,
       });
     } else if (isGitOpsWrite && !this.policyService) {
-      throw new Error('Policy service is not available for GitOps write intents');
+      throw ToolError.internal({
+        code: 'POLICY_SERVICE_UNAVAILABLE',
+        message: 'Policy service is not available for GitOps write intents',
+        hint: 'This is a server configuration error. Enable PolicyService or disable GitOps write intents.',
+      });
     }
 
     const stopOnError = args.stop_on_error !== false;
@@ -343,7 +362,12 @@ class IntentManager {
   async resolveCapability(intentType, context) {
     const candidates = await this.capabilityService.findAllByIntent(intentType);
     if (!candidates || candidates.length === 0) {
-      throw new Error(`Capability for intent '${intentType}' not found`);
+      throw ToolError.notFound({
+        code: 'CAPABILITY_NOT_FOUND',
+        message: `Capability for intent '${intentType}' not found`,
+        hint: 'Check capabilities.json (or configure capability mappings) and retry.',
+        details: { intent_type: intentType },
+      });
     }
 
     const resolvedContext = context && typeof context === 'object' ? context : {};
@@ -355,7 +379,12 @@ class IntentManager {
     }
 
     if (matched.length === 0) {
-      throw new Error(`No capability matched when-clause for intent '${intentType}'`);
+      throw ToolError.notFound({
+        code: 'CAPABILITY_NOT_MATCHED',
+        message: `No capability matched when-clause for intent '${intentType}'`,
+        hint: 'Provide the required context inputs (project/target/repo_root/etc) or adjust capability.when clauses.',
+        details: { intent_type: intentType },
+      });
     }
 
     matched.sort((a, b) => {
@@ -392,7 +421,12 @@ class IntentManager {
     }
 
     if (!allowMissing && missing.length > 0) {
-      throw new Error(`Missing required inputs: ${missing.join(', ')}`);
+      throw ToolError.invalidParams({
+        code: 'MISSING_INPUTS',
+        message: `Missing required inputs: ${missing.join(', ')}`,
+        hint: 'Provide the missing intent inputs and retry.',
+        details: { missing },
+      });
     }
 
     const plan = {
@@ -414,7 +448,12 @@ class IntentManager {
         return;
       }
       if (visiting.has(name)) {
-        throw new Error(`Capability dependency cycle at '${name}'`);
+        throw ToolError.internal({
+          code: 'CAPABILITY_DEP_CYCLE',
+          message: `Capability dependency cycle at '${name}'`,
+          hint: 'Fix capability.depends_on to remove cycles.',
+          details: { capability: name },
+        });
       }
       visiting.add(name);
       const capability = await this.capabilityService.getCapability(name);

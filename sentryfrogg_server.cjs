@@ -29,11 +29,13 @@ const Ajv = require('ajv');
 const ServiceBootstrap = require('./src/bootstrap/ServiceBootstrap.cjs');
 const { isUnsafeLocalEnabled } = require('./src/utils/featureFlags.cjs');
 const { redactObject } = require('./src/utils/redact.cjs');
+const ToolError = require('./src/errors/ToolError.cjs');
 
 const HELP_TOOL_ALIASES = {
   sql: 'mcp_psql_manager',
   psql: 'mcp_psql_manager',
   ssh: 'mcp_ssh_manager',
+  job: 'mcp_jobs',
   http: 'mcp_api_client',
   api: 'mcp_api_client',
   repo: 'mcp_repo',
@@ -121,6 +123,36 @@ const toolCatalog = [
         scope: { type: 'string', enum: ['session', 'persistent', 'any'] },
         prefix: { type: 'string' },
         include_values: { type: 'boolean' },
+        output: outputSchema,
+        store_as: { type: ['string', 'object'] },
+        store_scope: { type: 'string', enum: ['session', 'persistent'] },
+        trace_id: { type: 'string' },
+        span_id: { type: 'string' },
+        parent_span_id: { type: 'string' },
+        preset: { type: 'string' },
+        preset_name: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'mcp_jobs',
+    description: 'Unified job registry: status/wait/logs/cancel/list.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['job_status', 'job_wait', 'job_logs_tail', 'job_cancel', 'job_forget', 'job_list'],
+        },
+        job_id: { type: 'string' },
+        timeout_ms: { type: 'integer' },
+        poll_interval_ms: { type: 'integer' },
+        lines: { type: 'integer' },
+        signal: { type: 'string' },
+        limit: { type: 'integer' },
+        status: { type: 'string', enum: ['queued', 'running', 'succeeded', 'failed', 'canceled'] },
         output: outputSchema,
         store_as: { type: ['string', 'object'] },
         store_scope: { type: 'string', enum: ['session', 'persistent'] },
@@ -1132,6 +1164,45 @@ function formatContextDoc(lines) {
   return `${lines.join('\n').trim()}\n`;
 }
 
+function formatToolErrorMessage(tool, error) {
+  const lines = [
+    'SentryFroggError',
+    `tool: ${tool}`,
+    `kind: ${error.kind}`,
+    `code: ${error.code}`,
+    `retryable: ${error.retryable === true}`,
+    `message: ${error.message}`,
+  ];
+  if (error.hint) {
+    lines.push(`hint: ${error.hint}`);
+  }
+  return lines.join('\n');
+}
+
+function mapToolErrorToMcpError(tool, error) {
+  if (!ToolError.isToolError(error)) {
+    return new McpError(ErrorCode.InternalError, `Ошибка выполнения ${tool}: ${error?.message || String(error)}`);
+  }
+
+  const message = formatToolErrorMessage(tool, error);
+
+  switch (error.kind) {
+    case 'invalid_params':
+      return new McpError(ErrorCode.InvalidParams, message);
+    case 'timeout':
+      return new McpError(ErrorCode.RequestTimeout, message);
+    case 'denied':
+    case 'conflict':
+    case 'not_found':
+      return new McpError(ErrorCode.InvalidRequest, message);
+    case 'retryable':
+      return new McpError(ErrorCode.InternalError, message);
+    case 'internal':
+    default:
+      return new McpError(ErrorCode.InternalError, message);
+  }
+}
+
 function formatHelpResultToContext(result) {
   const lines = buildContextHeaderLegend();
   lines.push('[DATA]');
@@ -1562,6 +1633,14 @@ class SentryFroggServer {
           action: args?.action,
           error: error.message,
         });
+
+        if (error instanceof McpError) {
+          throw error;
+        }
+
+        if (ToolError.isToolError(error)) {
+          throw mapToolErrorToMcpError(name, error);
+        }
 
         throw new McpError(ErrorCode.InternalError, `Ошибка выполнения ${name}: ${error.message}`);
       }

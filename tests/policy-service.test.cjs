@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const PolicyService = require('../src/services/PolicyService.cjs');
 const StateService = require('../src/services/StateService.cjs');
+const ToolError = require('../src/errors/ToolError.cjs');
 
 const loggerStub = {
   child() {
@@ -63,7 +64,12 @@ test('PolicyService denies GitOps write without policy', async () => {
         traceId: 'trace-1',
         repoRoot: '/tmp/repo',
       }),
-    /require policy/
+    (error) => {
+      assert.equal(ToolError.isToolError(error), true);
+      assert.equal(error.kind, 'denied');
+      assert.equal(error.code, 'POLICY_REQUIRED');
+      return true;
+    }
   );
 });
 
@@ -86,6 +92,11 @@ test('PolicyService enforces change window when configured', async () => {
         traceId: 'trace-1',
         repoRoot: '/tmp/repo',
       }),
-    /change window/
+    (error) => {
+      assert.equal(ToolError.isToolError(error), true);
+      assert.equal(error.kind, 'denied');
+      assert.equal(error.code, 'POLICY_CHANGE_WINDOW');
+      return true;
+    }
   );
 });

@@ -6,6 +6,7 @@ const os = require('os');
 const CapabilityService = require('../src/services/CapabilityService.cjs');
 const EvidenceService = require('../src/services/EvidenceService.cjs');
 const IntentManager = require('../src/managers/IntentManager.cjs');
+const ToolError = require('../src/errors/ToolError.cjs');
 
 const loggerStub = {
   child() {
@@ -115,7 +116,12 @@ test('IntentManager compiles and enforces apply for write effects', async (t) =>
         action: 'execute',
         intent: { type: 'k8s.apply', inputs: { overlay: '/repo/overlay' } },
       }),
-    /apply=true/
+    (error) => {
+      assert.equal(ToolError.isToolError(error), true);
+      assert.equal(error.kind, 'denied');
+      assert.equal(error.code, 'APPLY_REQUIRED');
+      return true;
+    }
   );
 
   const executed = await intentManager.handleAction({

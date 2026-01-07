@@ -5,9 +5,251 @@
  */
 
 const crypto = require('crypto');
+const path = require('node:path');
 const { applyOutputTransform } = require('../utils/output.cjs');
 const { mergeDeep } = require('../utils/merge.cjs');
-const { redactObject } = require('../utils/redact.cjs');
+const { redactObject, isSensitiveKey } = require('../utils/redact.cjs');
+const {
+  resolveContextRepoRoot,
+  buildToolCallFileRef,
+  writeTextArtifact,
+  writeBinaryArtifact,
+} = require('../utils/artifacts.cjs');
+
+const DEFAULT_MAX_INLINE_BYTES = 16 * 1024;
+const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
+const DEFAULT_MAX_SPILLS = 20;
+
+function readPositiveInt(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    return null;
+  }
+  return Math.floor(numberValue);
+}
+
+function resolveMaxInlineBytes() {
+  const raw = process.env.SENTRYFROGG_MAX_INLINE_BYTES || process.env.SF_MAX_INLINE_BYTES;
+  return readPositiveInt(raw) ?? DEFAULT_MAX_INLINE_BYTES;
+}
+
+function resolveMaxCaptureBytes() {
+  const raw = process.env.SENTRYFROGG_MAX_CAPTURE_BYTES || process.env.SF_MAX_CAPTURE_BYTES;
+  return readPositiveInt(raw) ?? DEFAULT_MAX_CAPTURE_BYTES;
+}
+
+function safeFilenameSegment(value) {
+  const base = String(value || '').trim() || 'value';
+  return base
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+/, '')
+    .replace(/_+$/, '')
+    .slice(0, 64) || 'value';
+}
+
+function resolveSpillFilename(segments, { ext, used }) {
+  const normalized = segments
+    .filter((item) => item !== undefined && item !== null && String(item).trim().length)
+    .slice(-6)
+    .map((item) => safeFilenameSegment(item));
+
+  const base = normalized.length ? normalized.join('__') : 'value';
+  const safeBase = base.slice(0, 120);
+  const candidateBase = `${safeBase}.${ext}`;
+  const current = used.get(candidateBase) || 0;
+  used.set(candidateBase, current + 1);
+  if (current === 0) {
+    return candidateBase;
+  }
+  const parsed = path.parse(candidateBase);
+  return `${parsed.name}--${current + 1}${parsed.ext}`;
+}
+
+function truncateUtf8Prefix(value, maxBytes) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
+    return '';
+  }
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) {
+    return value;
+  }
+
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const slice = value.slice(0, mid);
+    const bytes = Buffer.byteLength(slice, 'utf8');
+    if (bytes <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return value.slice(0, low);
+}
+
+function computeSha256Text(value) {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function computeSha256Buffer(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function buildPreviewTailText(value, maxChars) {
+  if (typeof value !== 'string') {
+    return { preview: '', tail: '' };
+  }
+  const limit = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 0;
+  if (limit <= 0) {
+    return { preview: '', tail: '' };
+  }
+  if (value.length <= limit * 2) {
+    return { preview: value, tail: '' };
+  }
+  return {
+    preview: value.slice(0, limit),
+    tail: value.slice(-limit),
+  };
+}
+
+async function spillLargeValues(value, options, pathSegments = [], state = null) {
+  const ctx = options || {};
+  const runState = state || {
+    usedNames: new Map(),
+    spilled: 0,
+  };
+
+  const maxInlineBytes = ctx.maxInlineBytes;
+  const maxCaptureBytes = ctx.maxCaptureBytes;
+  const maxSpills = ctx.maxSpills;
+  const contextRoot = ctx.contextRoot;
+
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const bytes = Buffer.byteLength(value, 'utf8');
+    if (bytes <= maxInlineBytes) {
+      return value;
+    }
+
+    const hasSensitiveKey = pathSegments.some((segment) => isSensitiveKey(segment));
+    const previewLimit = Math.min(2048, Math.max(128, Math.floor(maxInlineBytes / 4)));
+    const { preview, tail } = buildPreviewTailText(value, previewLimit);
+
+    const capped = truncateUtf8Prefix(value, maxCaptureBytes);
+    const capturedBytes = Buffer.byteLength(capped, 'utf8');
+    const sha256 = computeSha256Text(capped);
+    const captureTruncated = capturedBytes < bytes;
+
+    let artifact = null;
+    if (!hasSensitiveKey && contextRoot && runState.spilled < maxSpills) {
+      const filename = resolveSpillFilename(pathSegments, { ext: 'txt', used: runState.usedNames });
+      const ref = buildToolCallFileRef({ traceId: ctx.traceId, spanId: ctx.spanId, filename });
+      const written = await writeTextArtifact(contextRoot, ref, capped);
+      runState.spilled += 1;
+      artifact = { uri: written.uri, rel: written.rel, bytes: written.bytes, truncated: captureTruncated };
+    }
+
+    return {
+      truncated: true,
+      bytes,
+      sha256,
+      artifact,
+      preview,
+      tail,
+    };
+  }
+
+  if (Buffer.isBuffer(value)) {
+    const bytes = value.length;
+    if (bytes <= maxInlineBytes) {
+      return value;
+    }
+
+    const hasSensitiveKey = pathSegments.some((segment) => isSensitiveKey(segment));
+    const captured = bytes > maxCaptureBytes ? value.subarray(0, maxCaptureBytes) : value;
+    const sha256 = computeSha256Buffer(captured);
+    const captureTruncated = captured.length < bytes;
+    const previewLimit = Math.min(256, captured.length);
+    const preview = captured.subarray(0, previewLimit).toString('base64');
+    const tail = previewLimit < captured.length
+      ? captured.subarray(captured.length - previewLimit).toString('base64')
+      : '';
+
+    let artifact = null;
+    if (!hasSensitiveKey && contextRoot && runState.spilled < maxSpills) {
+      const filename = resolveSpillFilename(pathSegments, { ext: 'bin', used: runState.usedNames });
+      const ref = buildToolCallFileRef({ traceId: ctx.traceId, spanId: ctx.spanId, filename });
+      const written = await writeBinaryArtifact(contextRoot, ref, captured);
+      runState.spilled += 1;
+      artifact = { uri: written.uri, rel: written.rel, bytes: written.bytes, truncated: captureTruncated };
+    }
+
+    return {
+      truncated: true,
+      bytes,
+      sha256,
+      artifact,
+      preview,
+      tail,
+    };
+  }
+
+  if (typeof value !== 'object') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    const next = await Promise.all(
+      value.map((item, idx) => spillLargeValues(item, ctx, pathSegments.concat(String(idx)), runState))
+    );
+    return next;
+  }
+
+  const out = {};
+  const entries = Object.entries(value);
+
+  for (const [key, raw] of entries) {
+    if (key.endsWith('_buffer') && Buffer.isBuffer(raw)) {
+      const refKey = key.replace(/_buffer$/, '_ref');
+      const existingRef = value[refKey];
+      if (existingRef && typeof existingRef === 'object' && typeof existingRef.uri === 'string') {
+        const bytes = raw.length;
+        const captured = bytes > maxCaptureBytes ? raw.subarray(0, maxCaptureBytes) : raw;
+        const sha256 = computeSha256Buffer(captured);
+        const captureTruncated = captured.length < bytes;
+        const previewLimit = Math.min(256, captured.length);
+        const preview = captured.subarray(0, previewLimit).toString('base64');
+        const tail = previewLimit < captured.length
+          ? captured.subarray(captured.length - previewLimit).toString('base64')
+          : '';
+
+        out[key] = {
+          truncated: true,
+          bytes,
+          sha256,
+          artifact: { uri: existingRef.uri, rel: existingRef.rel, bytes: existingRef.bytes, truncated: existingRef.truncated ?? captureTruncated },
+          preview,
+          tail,
+        };
+        continue;
+      }
+    }
+
+    out[key] = await spillLargeValues(raw, ctx, pathSegments.concat(key), runState);
+  }
+
+  return out;
+}
 
 class ToolExecutor {
   constructor(logger, stateService, aliasService, presetService, auditService, handlers = {}, options = {}) {
@@ -164,14 +406,26 @@ class ToolExecutor {
     const store = this.normalizeStoreTarget(args.store_as, args.store_scope);
 
     const shaped = applyOutputTransform(result, output);
+    const contextRoot = resolveContextRepoRoot();
+    const maxInlineBytes = resolveMaxInlineBytes();
+    const maxCaptureBytes = resolveMaxCaptureBytes();
+    const maxSpills = readPositiveInt(process.env.SENTRYFROGG_MAX_SPILLS || process.env.SF_MAX_SPILLS) ?? DEFAULT_MAX_SPILLS;
+    const spilled = await spillLargeValues(shaped, {
+      contextRoot,
+      traceId,
+      spanId,
+      maxInlineBytes,
+      maxCaptureBytes,
+      maxSpills,
+    });
 
     if (store?.key) {
-      await this.stateService.set(store.key, shaped, store.scope);
+      await this.stateService.set(store.key, spilled, store.scope);
     }
 
     return {
       ok: true,
-      result: shaped,
+      result: spilled,
       meta: this.compactMeta({
         tool,
         action: args.action,

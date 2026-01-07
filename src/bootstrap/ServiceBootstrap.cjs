@@ -181,6 +181,7 @@ class ServiceBootstrap {
     const CacheService = require('../services/CacheService.cjs');
     const WorkspaceService = require('../services/WorkspaceService.cjs');
     const PolicyService = require('../services/PolicyService.cjs');
+    const JobService = require('../services/JobService.cjs');
 
     // Logger (базовый сервис)
     this.container.register('logger', () => {
@@ -192,6 +193,12 @@ class ServiceBootstrap {
     this.container.register('security', (logger) => new Security(logger), { 
       singleton: true,
       dependencies: ['logger'] 
+    });
+
+    // Job service (unified async registry)
+    this.container.register('jobService', (logger) => new JobService(logger), {
+      singleton: true,
+      dependencies: ['logger'],
     });
 
     // Validation сервис
@@ -365,6 +372,7 @@ class ServiceBootstrap {
     const AuditManager = require('../managers/AuditManager.cjs');
     const PipelineManager = require('../managers/PipelineManager.cjs');
     const WorkspaceManager = require('../managers/WorkspaceManager.cjs');
+    const JobManager = require('../managers/JobManager.cjs');
     const ToolExecutor = require('../services/ToolExecutor.cjs');
     const { isUnsafeLocalEnabled } = require('../utils/featureFlags.cjs');
 
@@ -378,10 +386,18 @@ class ServiceBootstrap {
 
     // SSH Manager
     this.container.register('sshManager', 
-      (logger, security, validation, profileService, projectResolver, secretRefResolver) => 
-        new SSHManager(logger, security, validation, profileService, projectResolver, secretRefResolver), { 
+      (logger, security, validation, profileService, projectResolver, secretRefResolver, jobService) => 
+        new SSHManager(logger, security, validation, profileService, projectResolver, secretRefResolver, jobService), { 
       singleton: true,
-      dependencies: ['logger', 'security', 'validation', 'profileService', 'projectResolver', 'secretRefResolver'] 
+      dependencies: ['logger', 'security', 'validation', 'profileService', 'projectResolver', 'secretRefResolver', 'jobService'] 
+    });
+
+    // Job Manager (unified job API)
+    this.container.register('jobManager',
+      (logger, validation, jobService, sshManager) =>
+        new JobManager(logger, validation, jobService, { sshManager }), {
+      singleton: true,
+      dependencies: ['logger', 'validation', 'jobService', 'sshManager'],
     });
 
     // API Manager
@@ -403,10 +419,10 @@ class ServiceBootstrap {
 
     // Repo Manager (safe-by-default)
     this.container.register('repoManager',
-      (logger, security, validation, projectResolver) =>
-        new RepoManager(logger, security, validation, projectResolver), {
+      (logger, security, validation, projectResolver, policyService) =>
+        new RepoManager(logger, security, validation, projectResolver, policyService), {
       singleton: true,
-      dependencies: ['logger', 'security', 'validation', 'projectResolver'],
+      dependencies: ['logger', 'security', 'validation', 'projectResolver', 'policyService'],
     });
 
     // State Manager
@@ -467,10 +483,11 @@ class ServiceBootstrap {
 
     // Tool executor
     this.container.register('toolExecutor',
-      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, apiManager, repoManager, stateManager, projectManager, envManager, vaultManager, contextManager, capabilityManager, evidenceManager, aliasManager, presetManager, auditManager, pipelineManager) =>
+      (logger, stateService, aliasService, presetService, auditService, postgresqlManager, sshManager, jobManager, apiManager, repoManager, stateManager, projectManager, envManager, vaultManager, contextManager, capabilityManager, evidenceManager, aliasManager, presetManager, auditManager, pipelineManager) =>
         new ToolExecutor(logger, stateService, aliasService, presetService, auditService, {
           mcp_psql_manager: (args) => postgresqlManager.handleAction(args),
           mcp_ssh_manager: (args) => sshManager.handleAction(args),
+          mcp_jobs: (args) => jobManager.handleAction(args),
           mcp_api_client: (args) => apiManager.handleAction(args),
           mcp_repo: (args) => repoManager.handleAction(args),
           mcp_state: (args) => stateManager.handleAction(args),
@@ -489,6 +506,7 @@ class ServiceBootstrap {
             sql: 'mcp_psql_manager',
             psql: 'mcp_psql_manager',
             ssh: 'mcp_ssh_manager',
+            job: 'mcp_jobs',
             http: 'mcp_api_client',
             api: 'mcp_api_client',
             repo: 'mcp_repo',
@@ -515,6 +533,7 @@ class ServiceBootstrap {
         'auditService',
         'postgresqlManager',
         'sshManager',
+        'jobManager',
         'apiManager',
         'repoManager',
         'stateManager',

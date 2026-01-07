@@ -11,6 +11,14 @@ const { Client } = require('ssh2');
 const Constants = require('../constants/Constants.cjs');
 const { isTruthy } = require('../utils/featureFlags.cjs');
 const { expandHomePath } = require('../utils/userPaths.cjs');
+const {
+  resolveContextRepoRoot,
+  buildToolCallFileRef,
+  writeBinaryArtifact,
+} = require('../utils/artifacts.cjs');
+
+const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
+const DEFAULT_MAX_INLINE_BYTES = 16 * 1024;
 
 function profileKey(profileName) {
   return profileName;
@@ -128,13 +136,14 @@ function isChannelOpenFailure(error) {
 }
 
 class SSHManager {
-  constructor(logger, security, validation, profileService, projectResolver, secretRefResolver) {
+  constructor(logger, security, validation, profileService, projectResolver, secretRefResolver, jobService) {
     this.logger = logger.child('ssh');
     this.security = security;
     this.validation = validation;
     this.profileService = profileService;
     this.projectResolver = projectResolver;
     this.secretRefResolver = secretRefResolver;
+    this.jobService = jobService || null;
     this.connections = new Map();
     this.connecting = new Map();
     this.jobs = new Map();
@@ -762,17 +771,54 @@ class SSHManager {
     return fromEnv ?? Constants.NETWORK.TIMEOUT_SSH_DETACHED_START;
   }
 
+  resolveExecMaxCaptureBytes() {
+    const fromEnv = readPositiveInt(
+      process.env.SENTRYFROGG_SSH_MAX_CAPTURE_BYTES
+      || process.env.SF_SSH_MAX_CAPTURE_BYTES
+      || process.env.SENTRYFROGG_MAX_CAPTURE_BYTES
+      || process.env.SF_MAX_CAPTURE_BYTES
+    );
+    return fromEnv ?? DEFAULT_MAX_CAPTURE_BYTES;
+  }
+
+  resolveExecMaxInlineBytes() {
+    const fromEnv = readPositiveInt(
+      process.env.SENTRYFROGG_SSH_MAX_INLINE_BYTES
+      || process.env.SF_SSH_MAX_INLINE_BYTES
+      || process.env.SENTRYFROGG_MAX_INLINE_BYTES
+      || process.env.SF_MAX_INLINE_BYTES
+    );
+    return fromEnv ?? DEFAULT_MAX_INLINE_BYTES;
+  }
+
   registerJob(job) {
     if (!job || typeof job !== 'object' || !job.job_id) {
       return;
     }
-    this.jobs.set(job.job_id, job);
-    while (this.jobs.size > this.maxJobs) {
-      const oldest = this.jobs.keys().next().value;
-      if (!oldest) {
-        break;
+
+    if (this.jobService) {
+      this.jobService.upsert({
+        ...job,
+        kind: job.kind || 'ssh_detached',
+        status: job.status || 'running',
+        provider: job.provider || {
+          tool: 'mcp_ssh_manager',
+          profile_name: job.profile_name || null,
+          pid: job.pid,
+          pid_path: job.pid_path,
+          log_path: job.log_path,
+          exit_path: job.exit_path,
+        },
+      });
+    } else {
+      this.jobs.set(job.job_id, job);
+      while (this.jobs.size > this.maxJobs) {
+        const oldest = this.jobs.keys().next().value;
+        if (!oldest) {
+          break;
+        }
+        this.jobs.delete(oldest);
       }
-      this.jobs.delete(oldest);
     }
     this.stats.jobs_created += 1;
   }
@@ -935,12 +981,39 @@ class SSHManager {
       ? Math.min(this.resolveExecHardGraceMs(), Math.max(0, budgetMs - timeoutMs))
       : 0;
 
+    const maxCaptureBytes = this.resolveExecMaxCaptureBytes();
+    const maxInlineBytes = this.resolveExecMaxInlineBytes();
+
+    const traceId = args.trace_id || 'run';
+    const spanId = args.span_id || crypto.randomUUID();
+    const contextRoot = resolveContextRepoRoot();
+
     return new Promise((resolve, reject) => {
       const started = Date.now();
-      let stdout = '';
-      let stderr = '';
+      const stdoutState = { total: 0, captured: 0, truncated: false };
+      const stderrState = { total: 0, captured: 0, truncated: false };
+      const stdoutChunks = [];
+      const stderrChunks = [];
       let timedOut = false;
       let settled = false;
+
+      const captureChunk = (chunk, state, target) => {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ''));
+        state.total += buf.length;
+        if (state.captured >= maxCaptureBytes) {
+          state.truncated = true;
+          return;
+        }
+        const remaining = maxCaptureBytes - state.captured;
+        if (buf.length <= remaining) {
+          target.push(buf);
+          state.captured += buf.length;
+          return;
+        }
+        target.push(buf.subarray(0, remaining));
+        state.captured += remaining;
+        state.truncated = true;
+      };
 
       client.exec(command, options, (error, stream) => {
         if (error) {
@@ -953,7 +1026,83 @@ class SSHManager {
             return;
           }
           settled = true;
-          fn();
+          Promise.resolve()
+            .then(fn)
+            .then((value) => resolve(value))
+            .catch((err) => reject(err));
+        };
+
+        const buildResult = async ({ exitCode, signal, hardTimedOut = false }) => {
+          const stdoutBuffer = stdoutState.captured
+            ? Buffer.concat(stdoutChunks, stdoutState.captured)
+            : Buffer.alloc(0);
+          const stderrBuffer = stderrState.captured
+            ? Buffer.concat(stderrChunks, stderrState.captured)
+            : Buffer.alloc(0);
+
+          const stdoutInlineBuffer = stdoutBuffer.length > maxInlineBytes
+            ? stdoutBuffer.subarray(0, maxInlineBytes)
+            : stdoutBuffer;
+          const stderrInlineBuffer = stderrBuffer.length > maxInlineBytes
+            ? stderrBuffer.subarray(0, maxInlineBytes)
+            : stderrBuffer;
+
+          const stdoutInlineTruncated = stdoutBuffer.length > maxInlineBytes;
+          const stderrInlineTruncated = stderrBuffer.length > maxInlineBytes;
+
+          const shouldWriteStdout = Boolean(
+            contextRoot
+            && stdoutBuffer.length > 0
+            && (stdoutState.truncated || stdoutInlineTruncated)
+          );
+          const shouldWriteStderr = Boolean(
+            contextRoot
+            && stderrBuffer.length > 0
+            && (stderrState.truncated || stderrInlineTruncated)
+          );
+
+          let stdoutRef = null;
+          let stderrRef = null;
+
+          if (shouldWriteStdout) {
+            try {
+              const ref = buildToolCallFileRef({ traceId, spanId, filename: 'stdout.log' });
+              const written = await writeBinaryArtifact(contextRoot, ref, stdoutBuffer);
+              stdoutRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
+            } catch (artifactError) {
+              this.logger.warn('Failed to write SSH stdout artifact', { error: artifactError.message });
+            }
+          }
+
+          if (shouldWriteStderr) {
+            try {
+              const ref = buildToolCallFileRef({ traceId, spanId, filename: 'stderr.log' });
+              const written = await writeBinaryArtifact(contextRoot, ref, stderrBuffer);
+              stderrRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
+            } catch (artifactError) {
+              this.logger.warn('Failed to write SSH stderr artifact', { error: artifactError.message });
+            }
+          }
+
+          return {
+            stdout: stdoutInlineBuffer.toString('utf8').trim(),
+            stderr: stderrInlineBuffer.toString('utf8').trim(),
+            stdout_bytes: stdoutState.total,
+            stderr_bytes: stderrState.total,
+            stdout_captured_bytes: stdoutBuffer.length,
+            stderr_captured_bytes: stderrBuffer.length,
+            stdout_truncated: stdoutState.truncated,
+            stderr_truncated: stderrState.truncated,
+            stdout_inline_truncated: stdoutInlineTruncated,
+            stderr_inline_truncated: stderrInlineTruncated,
+            stdout_ref: stdoutRef,
+            stderr_ref: stderrRef,
+            exitCode,
+            signal,
+            timedOut,
+            hardTimedOut,
+            duration_ms: Date.now() - started,
+          };
         };
 
         let timeout;
@@ -989,17 +1138,7 @@ class SSHManager {
               // ignore
             }
 
-            finalize(() => {
-              resolve({
-                stdout: stdout.trim(),
-                stderr: stderr.trim(),
-                exitCode: null,
-                signal: null,
-                timedOut: true,
-                hardTimedOut: true,
-                duration_ms: Date.now() - started,
-              });
-            });
+            finalize(() => buildResult({ exitCode: null, signal: null, hardTimedOut: true }));
           }, timeoutMs + hardGraceMs);
         }
 
@@ -1011,16 +1150,7 @@ class SSHManager {
             if (hardTimeout) {
               clearTimeout(hardTimeout);
             }
-            finalize(() => {
-              resolve({
-                stdout: stdout.trim(),
-                stderr: stderr.trim(),
-                exitCode: code,
-                signal,
-                timedOut,
-                duration_ms: Date.now() - started,
-              });
-            });
+            finalize(() => buildResult({ exitCode: code, signal }));
           })
           .on('error', (streamError) => {
             if (timeout) {
@@ -1029,15 +1159,19 @@ class SSHManager {
             if (hardTimeout) {
               clearTimeout(hardTimeout);
             }
-            finalize(() => reject(streamError));
+            finalize(() => {
+              throw streamError;
+            });
           })
           .on('data', (data) => {
-            stdout += data.toString();
+            captureChunk(data, stdoutState, stdoutChunks);
           });
 
-        stream.stderr.on('data', (data) => {
-          stderr += data.toString();
-        });
+        if (stream.stderr && typeof stream.stderr.on === 'function') {
+          stream.stderr.on('data', (data) => {
+            captureChunk(data, stderrState, stderrChunks);
+          });
+        }
 
         if (stdin !== undefined && stdin !== null) {
           stream.end(String(stdin));
@@ -1051,9 +1185,17 @@ class SSHManager {
       ? this.validation.ensureString(args.job_id, 'job_id')
       : null;
 
-    const fromRegistry = jobId ? this.jobs.get(jobId) : null;
-    if (jobId && !fromRegistry) {
-      throw new Error(`Unknown job_id: ${jobId}`);
+    const fromRegistry = jobId
+      ? (this.jobService ? this.jobService.get(jobId) : this.jobs.get(jobId))
+      : null;
+
+    const hasExplicitLocator = args.pid !== undefined
+      || args.pid_path !== undefined
+      || args.log_path !== undefined
+      || args.exit_path !== undefined;
+
+    if (jobId && !fromRegistry && !hasExplicitLocator) {
+      return { job_id: jobId, not_found: true };
     }
 
     const logPathRaw = args.log_path ?? fromRegistry?.log_path;
@@ -1083,6 +1225,7 @@ class SSHManager {
 
     return {
       job_id: jobId,
+      not_found: false,
       profile_name: fromRegistry?.profile_name ?? null,
       pid,
       pid_path: pidPath,
@@ -1093,6 +1236,9 @@ class SSHManager {
 
   async jobStatus(args = {}) {
     const job = this.resolveJobSpec(args);
+    if (job.not_found) {
+      return { success: false, code: 'NOT_FOUND', job_id: job.job_id };
+    }
     const budgetMs = this.resolveToolCallBudgetMs();
     const timeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 10000, budgetMs);
 
@@ -1168,6 +1314,13 @@ class SSHManager {
     const started = Date.now();
 
     let status = await this.jobStatus({ ...args, timeout_ms: Math.min(10000, budgetMs) });
+    if (!status.success && status.code === 'NOT_FOUND') {
+      return {
+        success: false,
+        code: 'NOT_FOUND',
+        job_id: args.job_id,
+      };
+    }
     while (!status.exited && Date.now() - started + pollMs <= timeoutMs) {
       await sleep(pollMs);
       status = await this.jobStatus({ ...args, timeout_ms: Math.min(10000, budgetMs) });
@@ -1187,6 +1340,9 @@ class SSHManager {
 
   async jobLogsTail(args = {}) {
     const spec = this.resolveJobSpec(args, { requirePid: false });
+    if (spec.not_found) {
+      return { success: false, code: 'NOT_FOUND', job_id: spec.job_id };
+    }
     const logPath = spec.log_path;
     if (!logPath) {
       throw new Error('log_path is required (or job_id with known log_path)');
@@ -1216,6 +1372,9 @@ class SSHManager {
 
   async jobKill(args = {}) {
     const job = this.resolveJobSpec(args);
+    if (job.not_found) {
+      return { success: false, code: 'NOT_FOUND', job_id: job.job_id };
+    }
     const budgetMs = this.resolveToolCallBudgetMs();
     const timeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 10000, budgetMs);
 
@@ -1263,8 +1422,8 @@ class SSHManager {
 
   async jobForget(args = {}) {
     const jobId = this.validation.ensureString(args.job_id, 'job_id');
-    const existed = this.jobs.delete(jobId);
-    return { success: true, job_id: jobId, removed: existed };
+    const removed = this.jobService ? this.jobService.forget(jobId) : this.jobs.delete(jobId);
+    return { success: true, job_id: jobId, removed };
   }
 
   async batch(args) {
@@ -1592,7 +1751,8 @@ class SSHManager {
   }
 
   getStats() {
-    return { ...this.stats, active_connections: this.connections.size, active_jobs: this.jobs.size };
+    const activeJobs = this.jobService ? this.jobService.getStats().jobs : this.jobs.size;
+    return { ...this.stats, active_connections: this.connections.size, active_jobs: activeJobs };
   }
 
   async cleanup() {

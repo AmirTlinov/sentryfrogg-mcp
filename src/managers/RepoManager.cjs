@@ -86,6 +86,55 @@ function findKubectlToken(argv, startIndex) {
   return null;
 }
 
+function extractKubectlNamespace(argv) {
+  if (!Array.isArray(argv)) {
+    return null;
+  }
+  for (let idx = 0; idx < argv.length; idx += 1) {
+    const token = argv[idx];
+    if (token === '--') {
+      break;
+    }
+    if (token === '-n' || token === '--namespace') {
+      const next = argv[idx + 1];
+      if (typeof next === 'string' && next.trim()) {
+        return next.trim();
+      }
+      return null;
+    }
+    if (typeof token === 'string' && token.startsWith('--namespace=')) {
+      const value = token.slice('--namespace='.length).trim();
+      return value || null;
+    }
+    if (typeof token === 'string' && token.startsWith('-n=')) {
+      const value = token.slice(3).trim();
+      return value || null;
+    }
+  }
+  return null;
+}
+
+function isKubectlReadOnly(argv) {
+  const found = findKubectlToken(argv, 0);
+  if (!found) {
+    return false;
+  }
+  const subcommand = found.token;
+  const subcommandIndex = found.index;
+  if (READ_ONLY_EXEC_SUBCOMMANDS.kubectl?.has(subcommand)) {
+    return true;
+  }
+  const nested = READ_ONLY_EXEC_SUBSUBCOMMANDS.kubectl?.[subcommand];
+  if (!nested) {
+    return false;
+  }
+  const second = findKubectlToken(argv, subcommandIndex + 1);
+  if (!second) {
+    return false;
+  }
+  return nested.has(second.token);
+}
+
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
 const DEFAULT_MAX_INLINE_BYTES = 16 * 1024;
@@ -272,11 +321,12 @@ function extractK8sImages(renderedText) {
 }
 
 class RepoManager {
-  constructor(logger, security, validation, projectResolver) {
+  constructor(logger, security, validation, projectResolver, policyService) {
     this.logger = logger.child('repo');
     this.security = security;
     this.validation = validation;
     this.projectResolver = projectResolver;
+    this.policyService = policyService;
 
     this.stats = {
       calls: 0,
@@ -1127,39 +1177,63 @@ class RepoManager {
     const repoRoot = await resolveSandboxPath(repoRootRaw, null);
     const gitRoot = await this.resolveGitRoot(repoRoot);
 
-    await this.ensurePatchSafe(gitRoot, patch);
+    const traceId = args.trace_id || crypto.randomUUID();
+    const projectContext = this.projectResolver
+      ? await this.projectResolver.resolveContext(args).catch(() => null)
+      : null;
 
-    const traceId = args.trace_id || 'run';
-    const spanId = args.span_id;
-    const patchRef = await this.writeArtifact('patch.diff', Buffer.from(patch, 'utf8'), { traceId, spanId, truncated: false });
+    const policyGuard = this.policyService
+      ? await this.policyService.guardRepoWrite({
+        action: 'apply_patch',
+        inputs: args,
+        traceId,
+        projectContext,
+        repoRoot: gitRoot,
+      })
+      : null;
 
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sf-git-patch-'));
-    const tmpPath = path.join(tmpDir, 'patch.diff');
     try {
-      await fs.writeFile(tmpPath, patch, { encoding: 'utf8', mode: 0o600 });
+      await this.ensurePatchSafe(gitRoot, patch);
 
-      const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
-      const check = await this.runGit({ cwd: gitRoot, argv: ['apply', '--check', tmpPath], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
-      if (check.exit_code !== 0) {
-        throw new Error(check.stderr_buffer.toString('utf8').trim() || 'git apply --check failed');
+      const spanId = args.span_id;
+      const patchRef = await this.writeArtifact('patch.diff', Buffer.from(patch, 'utf8'), { traceId, spanId, truncated: false });
+
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sf-git-patch-'));
+      const tmpPath = path.join(tmpDir, 'patch.diff');
+      try {
+        await fs.writeFile(tmpPath, patch, { encoding: 'utf8', mode: 0o600 });
+
+        const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
+        const check = await this.runGit({ cwd: gitRoot, argv: ['apply', '--check', tmpPath], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
+        if (check.exit_code !== 0) {
+          throw new Error(check.stderr_buffer.toString('utf8').trim() || 'git apply --check failed');
+        }
+
+        const applied = await this.runGit({ cwd: gitRoot, argv: ['apply', '--whitespace=nowarn', tmpPath], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
+        if (applied.exit_code !== 0) {
+          throw new Error(applied.stderr_buffer.toString('utf8').trim() || 'git apply failed');
+        }
+
+        const stat = await this.runGit({ cwd: gitRoot, argv: ['diff', '--stat'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
+        const diffstat = stat.exit_code === 0 ? stat.stdout_buffer.toString('utf8').trimEnd() : null;
+
+        return {
+          success: true,
+          repo_root: gitRoot,
+          patch_ref: patchRef,
+          diffstat,
+        };
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => null);
       }
-
-      const applied = await this.runGit({ cwd: gitRoot, argv: ['apply', '--whitespace=nowarn', tmpPath], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
-      if (applied.exit_code !== 0) {
-        throw new Error(applied.stderr_buffer.toString('utf8').trim() || 'git apply failed');
-      }
-
-      const stat = await this.runGit({ cwd: gitRoot, argv: ['diff', '--stat'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
-      const diffstat = stat.exit_code === 0 ? stat.stdout_buffer.toString('utf8').trimEnd() : null;
-
-      return {
-        success: true,
-        repo_root: gitRoot,
-        patch_ref: patchRef,
-        diffstat,
-      };
     } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => null);
+      if (policyGuard) {
+        try {
+          await policyGuard.release();
+        } catch (error) {
+          this.logger.warn('Failed to release policy lock', { error: error.message });
+        }
+      }
     }
   }
 
@@ -1175,50 +1249,75 @@ class RepoManager {
     const repoRoot = await resolveSandboxPath(repoRootRaw, null);
     const gitRoot = await this.resolveGitRoot(repoRoot);
 
-    const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
+    const traceId = args.trace_id || crypto.randomUUID();
+    const projectContext = this.projectResolver
+      ? await this.projectResolver.resolveContext(args).catch(() => null)
+      : null;
 
-    const add = await this.runGit({ cwd: gitRoot, argv: ['add', '-A'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
-    if (add.exit_code !== 0) {
-      throw new Error(add.stderr_buffer.toString('utf8').trim() || 'git add failed');
-    }
+    const policyGuard = this.policyService
+      ? await this.policyService.guardRepoWrite({
+        action: 'git_commit',
+        inputs: args,
+        traceId,
+        projectContext,
+        repoRoot: gitRoot,
+      })
+      : null;
 
-    const staged = await this.runGit({ cwd: gitRoot, argv: ['diff', '--cached', '--name-only'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
-    const stagedList = staged.exit_code === 0
-      ? staged.stdout_buffer.toString('utf8').trim().split(/\r?\n/).filter(Boolean)
-      : [];
-    if (stagedList.length === 0) {
-      throw new Error('No staged changes to commit');
-    }
-
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sf-git-commit-'));
-    const msgPath = path.join(tmpDir, 'message.txt');
     try {
-      await fs.writeFile(msgPath, message, { encoding: 'utf8', mode: 0o600 });
+      const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
 
-      const commit = await this.runGit({
-        cwd: gitRoot,
-        argv: ['-c', 'commit.gpgSign=false', 'commit', '-F', msgPath],
-        timeoutMs,
-        maxCaptureBytes: maxCaptureBytes,
-      });
-
-      if (commit.exit_code !== 0) {
-        throw new Error(commit.stderr_buffer.toString('utf8').trim() || 'git commit failed');
+      const add = await this.runGit({ cwd: gitRoot, argv: ['add', '-A'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
+      if (add.exit_code !== 0) {
+        throw new Error(add.stderr_buffer.toString('utf8').trim() || 'git add failed');
       }
 
-      const head = await this.runGit({ cwd: gitRoot, argv: ['rev-parse', 'HEAD'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
-      if (head.exit_code !== 0) {
-        throw new Error(head.stderr_buffer.toString('utf8').trim() || 'git rev-parse HEAD failed');
+      const staged = await this.runGit({ cwd: gitRoot, argv: ['diff', '--cached', '--name-only'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
+      const stagedList = staged.exit_code === 0
+        ? staged.stdout_buffer.toString('utf8').trim().split(/\r?\n/).filter(Boolean)
+        : [];
+      if (stagedList.length === 0) {
+        throw new Error('No staged changes to commit');
       }
 
-      return {
-        success: true,
-        repo_root: gitRoot,
-        sha: head.stdout_buffer.toString('utf8').trim(),
-        committed_files: stagedList,
-      };
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sf-git-commit-'));
+      const msgPath = path.join(tmpDir, 'message.txt');
+      try {
+        await fs.writeFile(msgPath, message, { encoding: 'utf8', mode: 0o600 });
+
+        const commit = await this.runGit({
+          cwd: gitRoot,
+          argv: ['-c', 'commit.gpgSign=false', 'commit', '-F', msgPath],
+          timeoutMs,
+          maxCaptureBytes: maxCaptureBytes,
+        });
+
+        if (commit.exit_code !== 0) {
+          throw new Error(commit.stderr_buffer.toString('utf8').trim() || 'git commit failed');
+        }
+
+        const head = await this.runGit({ cwd: gitRoot, argv: ['rev-parse', 'HEAD'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
+        if (head.exit_code !== 0) {
+          throw new Error(head.stderr_buffer.toString('utf8').trim() || 'git rev-parse HEAD failed');
+        }
+
+        return {
+          success: true,
+          repo_root: gitRoot,
+          sha: head.stdout_buffer.toString('utf8').trim(),
+          committed_files: stagedList,
+        };
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => null);
+      }
     } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => null);
+      if (policyGuard) {
+        try {
+          await policyGuard.release();
+        } catch (error) {
+          this.logger.warn('Failed to release policy lock', { error: error.message });
+        }
+      }
     }
   }
 
@@ -1241,44 +1340,68 @@ class RepoManager {
     const repoRoot = await resolveSandboxPath(repoRootRaw, null);
     const gitRoot = await this.resolveGitRoot(repoRoot);
 
-    const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
+    const traceId = args.trace_id || crypto.randomUUID();
+    const projectContext = this.projectResolver
+      ? await this.projectResolver.resolveContext(args).catch(() => null)
+      : null;
 
-    const argv = ['-c', 'commit.gpgSign=false', 'revert', '--no-edit'];
-    if (mainline !== null) {
-      argv.push('-m', String(Math.floor(mainline)));
+    const policyGuard = this.policyService
+      ? await this.policyService.guardRepoWrite({
+        action: 'git_revert',
+        inputs: args,
+        traceId,
+        projectContext,
+        repoRoot: gitRoot,
+      })
+      : null;
+
+    try {
+      const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
+
+      const argv = ['-c', 'commit.gpgSign=false', 'revert', '--no-edit'];
+      if (mainline !== null) {
+        argv.push('-m', String(Math.floor(mainline)));
+      }
+      argv.push(sha);
+
+      const revert = await this.runGit({ cwd: gitRoot, argv, timeoutMs, maxCaptureBytes });
+      if (revert.exit_code !== 0) {
+        throw new Error(revert.stderr_buffer.toString('utf8').trim() || 'git revert failed');
+      }
+
+      const spanId = args.span_id;
+      const revertLog = await this.writeArtifact('revert.log', Buffer.concat([revert.stdout_buffer, revert.stderr_buffer]), {
+        traceId,
+        spanId,
+        truncated: revert.stdout_truncated || revert.stderr_truncated,
+      });
+
+      const head = await this.runGit({
+        cwd: gitRoot,
+        argv: ['rev-parse', 'HEAD'],
+        timeoutMs,
+        maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024),
+      });
+      if (head.exit_code !== 0) {
+        throw new Error(head.stderr_buffer.toString('utf8').trim() || 'git rev-parse HEAD failed');
+      }
+
+      return {
+        success: true,
+        repo_root: gitRoot,
+        reverted_sha: sha,
+        head: head.stdout_buffer.toString('utf8').trim(),
+        revert_ref: revertLog,
+      };
+    } finally {
+      if (policyGuard) {
+        try {
+          await policyGuard.release();
+        } catch (error) {
+          this.logger.warn('Failed to release policy lock', { error: error.message });
+        }
+      }
     }
-    argv.push(sha);
-
-    const revert = await this.runGit({ cwd: gitRoot, argv, timeoutMs, maxCaptureBytes });
-    if (revert.exit_code !== 0) {
-      throw new Error(revert.stderr_buffer.toString('utf8').trim() || 'git revert failed');
-    }
-
-    const traceId = args.trace_id || 'run';
-    const spanId = args.span_id;
-    const revertLog = await this.writeArtifact('revert.log', Buffer.concat([revert.stdout_buffer, revert.stderr_buffer]), {
-      traceId,
-      spanId,
-      truncated: revert.stdout_truncated || revert.stderr_truncated,
-    });
-
-    const head = await this.runGit({
-      cwd: gitRoot,
-      argv: ['rev-parse', 'HEAD'],
-      timeoutMs,
-      maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024),
-    });
-    if (head.exit_code !== 0) {
-      throw new Error(head.stderr_buffer.toString('utf8').trim() || 'git rev-parse HEAD failed');
-    }
-
-    return {
-      success: true,
-      repo_root: gitRoot,
-      reverted_sha: sha,
-      head: head.stdout_buffer.toString('utf8').trim(),
-      revert_ref: revertLog,
-    };
   }
 
   async gitPush(args) {
@@ -1292,40 +1415,64 @@ class RepoManager {
 
     const remote = args.remote ? this.validation.ensureString(String(args.remote), 'remote') : 'origin';
 
-    const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
+    const traceId = args.trace_id || crypto.randomUUID();
+    const projectContext = this.projectResolver
+      ? await this.projectResolver.resolveContext(args).catch(() => null)
+      : null;
 
-    let branch = args.branch ? this.validation.ensureString(String(args.branch), 'branch') : null;
-    if (!branch) {
-      const current = await this.runGit({ cwd: gitRoot, argv: ['rev-parse', '--abbrev-ref', 'HEAD'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
-      if (current.exit_code !== 0) {
-        throw new Error(current.stderr_buffer.toString('utf8').trim() || 'Unable to resolve current branch');
+    const policyGuard = this.policyService
+      ? await this.policyService.guardRepoWrite({
+        action: 'git_push',
+        inputs: { ...args, remote },
+        traceId,
+        projectContext,
+        repoRoot: gitRoot,
+      })
+      : null;
+
+    try {
+      const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
+
+      let branch = args.branch ? this.validation.ensureString(String(args.branch), 'branch') : null;
+      if (!branch) {
+        const current = await this.runGit({ cwd: gitRoot, argv: ['rev-parse', '--abbrev-ref', 'HEAD'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
+        if (current.exit_code !== 0) {
+          throw new Error(current.stderr_buffer.toString('utf8').trim() || 'Unable to resolve current branch');
+        }
+        branch = current.stdout_buffer.toString('utf8').trim();
+        if (!branch || branch === 'HEAD') {
+          throw new Error('Detached HEAD cannot be pushed without explicit branch');
+        }
       }
-      branch = current.stdout_buffer.toString('utf8').trim();
-      if (!branch || branch === 'HEAD') {
-        throw new Error('Detached HEAD cannot be pushed without explicit branch');
+
+      const push = await this.runGit({ cwd: gitRoot, argv: ['push', remote, branch], timeoutMs, maxCaptureBytes });
+      if (push.exit_code !== 0) {
+        throw new Error(push.stderr_buffer.toString('utf8').trim() || 'git push failed');
+      }
+
+      const spanId = args.span_id;
+      const pushLog = await this.writeArtifact('push.log', Buffer.concat([push.stdout_buffer, push.stderr_buffer]), {
+        traceId,
+        spanId,
+        truncated: push.stdout_truncated || push.stderr_truncated,
+      });
+
+      return {
+        success: true,
+        repo_root: gitRoot,
+        remote,
+        branch,
+        push_ref: pushLog,
+      };
+    } finally {
+      if (policyGuard) {
+        try {
+          await policyGuard.release();
+        } catch (error) {
+          this.logger.warn('Failed to release policy lock', { error: error.message });
+        }
       }
     }
-
-    const push = await this.runGit({ cwd: gitRoot, argv: ['push', remote, branch], timeoutMs, maxCaptureBytes });
-    if (push.exit_code !== 0) {
-      throw new Error(push.stderr_buffer.toString('utf8').trim() || 'git push failed');
-    }
-
-    const traceId = args.trace_id || 'run';
-    const spanId = args.span_id;
-    const pushLog = await this.writeArtifact('push.log', Buffer.concat([push.stdout_buffer, push.stderr_buffer]), {
-      traceId,
-      spanId,
-      truncated: push.stdout_truncated || push.stderr_truncated,
-    });
-
-    return {
-      success: true,
-      repo_root: gitRoot,
-      remote,
-      branch,
-      push_ref: pushLog,
-    };
   }
 
   ensureExecAllowed({ command, argv, apply }) {
@@ -1406,11 +1553,53 @@ class RepoManager {
 
     this.ensureExecAllowed({ command, argv, apply });
 
+    const isWrite = apply && (() => {
+      if (!argv || argv.length === 0) {
+        return true;
+      }
+      const subcommand = argv[0];
+      if (command === 'git') {
+        return !(typeof subcommand === 'string' && READ_ONLY_GIT_SUBCOMMANDS.has(subcommand));
+      }
+      if (command === 'kubectl') {
+        return !isKubectlReadOnly(argv);
+      }
+      const allowed = READ_ONLY_EXEC_SUBCOMMANDS[command];
+      if (!allowed) {
+        return true;
+      }
+      return !(typeof subcommand === 'string' && allowed.has(subcommand));
+    })();
+
     const repoRootRaw = await this.resolveRepoRoot(args);
     const repoRoot = await resolveSandboxPath(repoRootRaw, null);
     const cwd = args.cwd
       ? await resolveSandboxPath(repoRoot, this.validation.ensureString(String(args.cwd), 'cwd', { trim: false }))
       : repoRoot;
+
+    const traceId = args.trace_id || crypto.randomUUID();
+    const projectContext = this.projectResolver
+      ? await this.projectResolver.resolveContext(args).catch(() => null)
+      : null;
+
+    const kubectlNamespace = command === 'kubectl' ? extractKubectlNamespace(argv) : null;
+
+    const policyGuard = isWrite && this.policyService
+      ? (command === 'kubectl'
+        ? await this.policyService.guardKubectlWrite({
+          inputs: { ...args, namespace: kubectlNamespace },
+          traceId,
+          projectContext,
+          repoRoot,
+        })
+        : await this.policyService.guardRepoWrite({
+          action: `exec:${command}`,
+          inputs: args,
+          traceId,
+          projectContext,
+          repoRoot,
+        }))
+      : null;
 
     const env = {
       ...process.env,
@@ -1423,28 +1612,29 @@ class RepoManager {
     }
 
     const started = Date.now();
-    const child = spawn(command, command === 'git' ? ['--no-pager', ...argv] : argv, {
-      cwd,
-      env,
-      shell: false,
-      windowsHide: true,
-    });
+    try {
+      const child = spawn(command, command === 'git' ? ['--no-pager', ...argv] : argv, {
+        cwd,
+        env,
+        shell: false,
+        windowsHide: true,
+      });
 
-    if (stdin !== undefined && stdin !== null) {
-      child.stdin?.end(String(stdin));
-    } else {
-      child.stdin?.end();
-    }
+      if (stdin !== undefined && stdin !== null) {
+        child.stdin?.end(String(stdin));
+      } else {
+        child.stdin?.end();
+      }
 
-    let stdoutTotal = 0;
-    let stderrTotal = 0;
-    let stdoutBuffers = [];
-    let stderrBuffers = [];
-    let stdoutCaptured = 0;
-    let stderrCaptured = 0;
-    let stdoutTruncated = false;
-    let stderrTruncated = false;
-    let timedOut = false;
+      let stdoutTotal = 0;
+      let stderrTotal = 0;
+      let stdoutBuffers = [];
+      let stderrBuffers = [];
+      let stdoutCaptured = 0;
+      let stderrCaptured = 0;
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
+      let timedOut = false;
 
     const capture = (chunk, state) => {
       const size = chunk.length;
@@ -1464,132 +1654,140 @@ class RepoManager {
       state.truncated = true;
     };
 
-    const stdoutState = { total: 0, captured: 0, buffers: stdoutBuffers, truncated: false };
-    const stderrState = { total: 0, captured: 0, buffers: stderrBuffers, truncated: false };
+      const stdoutState = { total: 0, captured: 0, buffers: stdoutBuffers, truncated: false };
+      const stderrState = { total: 0, captured: 0, buffers: stderrBuffers, truncated: false };
 
-    if (child.stdout) {
-      child.stdout.on('data', (chunk) => capture(chunk, stdoutState));
-    }
-    if (child.stderr) {
-      child.stderr.on('data', (chunk) => capture(chunk, stderrState));
-    }
-
-    let timeout;
-    if (timeoutMs) {
-      timeout = setTimeout(() => {
-        timedOut = true;
-        try {
-          child.kill('SIGKILL');
-        } catch (error) {
-        }
-      }, timeoutMs);
-    }
-
-    let exitCode = 1;
-    let signal;
-
-    const finished = await new Promise((resolve, reject) => {
-      child.once('error', reject);
-      child.once('close', (code, sig) => resolve({ code, sig }));
-    });
-
-    exitCode = typeof finished.code === 'number' ? finished.code : 1;
-    signal = finished.sig;
-
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-
-    stdoutTotal = stdoutState.total;
-    stderrTotal = stderrState.total;
-    stdoutCaptured = stdoutState.captured;
-    stderrCaptured = stderrState.captured;
-    stdoutTruncated = stdoutState.truncated;
-    stderrTruncated = stderrState.truncated;
-
-    const stdoutBuffer = stdoutCaptured ? Buffer.concat(stdoutBuffers, stdoutCaptured) : Buffer.alloc(0);
-    const stderrBuffer = stderrCaptured ? Buffer.concat(stderrBuffers, stderrCaptured) : Buffer.alloc(0);
-
-    const contextRoot = resolveContextRepoRoot();
-    const traceId = args.trace_id || 'run';
-    const spanId = args.span_id;
-
-    const stdoutArtifact = contextRoot && stdoutBuffer.length
-      ? await writeBinaryArtifact(
-        contextRoot,
-        buildToolCallFileRef({ traceId, spanId, filename: 'stdout.log' }),
-        stdoutBuffer
-      )
-      : null;
-
-    const stderrArtifact = contextRoot && stderrBuffer.length
-      ? await writeBinaryArtifact(
-        contextRoot,
-        buildToolCallFileRef({ traceId, spanId, filename: 'stderr.log' }),
-        stderrBuffer
-      )
-      : null;
-
-    const inline = args.inline === true;
-    const decodeInline = (buffer) => {
-      if (!inline || !buffer.length) {
-        return { text: undefined, truncated: false };
+      if (child.stdout) {
+        child.stdout.on('data', (chunk) => capture(chunk, stdoutState));
       }
-      const sliced = buffer.length > maxInlineBytes ? buffer.subarray(0, maxInlineBytes) : buffer;
-      return {
-        text: sliced.toString('utf8').trimEnd(),
-        truncated: buffer.length > maxInlineBytes,
+      if (child.stderr) {
+        child.stderr.on('data', (chunk) => capture(chunk, stderrState));
+      }
+
+      let timeout;
+      if (timeoutMs) {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          try {
+            child.kill('SIGKILL');
+          } catch (error) {
+          }
+        }, timeoutMs);
+      }
+
+      let exitCode = 1;
+      let signal;
+
+      const finished = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', (code, sig) => resolve({ code, sig }));
+      });
+
+      exitCode = typeof finished.code === 'number' ? finished.code : 1;
+      signal = finished.sig;
+
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+
+      stdoutTotal = stdoutState.total;
+      stderrTotal = stderrState.total;
+      stdoutCaptured = stdoutState.captured;
+      stderrCaptured = stderrState.captured;
+      stdoutTruncated = stdoutState.truncated;
+      stderrTruncated = stderrState.truncated;
+
+      const stdoutBuffer = stdoutCaptured ? Buffer.concat(stdoutBuffers, stdoutCaptured) : Buffer.alloc(0);
+      const stderrBuffer = stderrCaptured ? Buffer.concat(stderrBuffers, stderrCaptured) : Buffer.alloc(0);
+
+      const contextRoot = resolveContextRepoRoot();
+      const spanId = args.span_id;
+
+      const stdoutArtifact = contextRoot && stdoutBuffer.length
+        ? await writeBinaryArtifact(
+          contextRoot,
+          buildToolCallFileRef({ traceId, spanId, filename: 'stdout.log' }),
+          stdoutBuffer
+        )
+        : null;
+
+      const stderrArtifact = contextRoot && stderrBuffer.length
+        ? await writeBinaryArtifact(
+          contextRoot,
+          buildToolCallFileRef({ traceId, spanId, filename: 'stderr.log' }),
+          stderrBuffer
+        )
+        : null;
+
+      const inline = args.inline === true;
+      const decodeInline = (buffer) => {
+        if (!inline || !buffer.length) {
+          return { text: undefined, truncated: false };
+        }
+        const sliced = buffer.length > maxInlineBytes ? buffer.subarray(0, maxInlineBytes) : buffer;
+        return {
+          text: sliced.toString('utf8').trimEnd(),
+          truncated: buffer.length > maxInlineBytes,
+        };
       };
-    };
 
-    const stdoutInline = decodeInline(stdoutBuffer);
-    const stderrInline = decodeInline(stderrBuffer);
+      const stdoutInline = decodeInline(stdoutBuffer);
+      const stderrInline = decodeInline(stderrBuffer);
 
-    let stdoutJson;
-    let stdoutJsonError;
-    if (args.parse_json === true) {
-      if (stdoutTruncated) {
-        stdoutJsonError = 'stdout truncated';
-      } else if (stdoutBuffer.length) {
+      let stdoutJson;
+      let stdoutJsonError;
+      if (args.parse_json === true) {
+        if (stdoutTruncated) {
+          stdoutJsonError = 'stdout truncated';
+        } else if (stdoutBuffer.length) {
+          try {
+            stdoutJson = JSON.parse(stdoutBuffer.toString('utf8'));
+          } catch (error) {
+            stdoutJsonError = error.message;
+          }
+        }
+      }
+
+      this.stats.exec += 1;
+
+      return {
+        success: exitCode === 0 && !timedOut,
+        repo_root: repoRoot,
+        cwd,
+        command,
+        args: argv,
+        exit_code: exitCode,
+        signal,
+        timed_out: timedOut,
+        duration_ms: Date.now() - started,
+        stdout_bytes: stdoutTotal,
+        stderr_bytes: stderrTotal,
+        stdout_captured_bytes: stdoutCaptured,
+        stderr_captured_bytes: stderrCaptured,
+        stdout_truncated: stdoutTruncated,
+        stderr_truncated: stderrTruncated,
+        stdout_inline: stdoutInline.text,
+        stderr_inline: stderrInline.text,
+        stdout_inline_truncated: stdoutInline.truncated,
+        stderr_inline_truncated: stderrInline.truncated,
+        stdout_json: stdoutJson,
+        stdout_json_error: stdoutJsonError,
+        stdout_ref: stdoutArtifact
+          ? { uri: stdoutArtifact.uri, rel: stdoutArtifact.rel, bytes: stdoutArtifact.bytes, truncated: stdoutTruncated }
+          : null,
+        stderr_ref: stderrArtifact
+          ? { uri: stderrArtifact.uri, rel: stderrArtifact.rel, bytes: stderrArtifact.bytes, truncated: stderrTruncated }
+          : null,
+      };
+    } finally {
+      if (policyGuard) {
         try {
-          stdoutJson = JSON.parse(stdoutBuffer.toString('utf8'));
+          await policyGuard.release();
         } catch (error) {
-          stdoutJsonError = error.message;
+          this.logger.warn('Failed to release policy lock', { error: error.message });
         }
       }
     }
-
-    this.stats.exec += 1;
-
-    return {
-      success: exitCode === 0 && !timedOut,
-      repo_root: repoRoot,
-      cwd,
-      command,
-      args: argv,
-      exit_code: exitCode,
-      signal,
-      timed_out: timedOut,
-      duration_ms: Date.now() - started,
-      stdout_bytes: stdoutTotal,
-      stderr_bytes: stderrTotal,
-      stdout_captured_bytes: stdoutCaptured,
-      stderr_captured_bytes: stderrCaptured,
-      stdout_truncated: stdoutTruncated,
-      stderr_truncated: stderrTruncated,
-      stdout_inline: stdoutInline.text,
-      stderr_inline: stderrInline.text,
-      stdout_inline_truncated: stdoutInline.truncated,
-      stderr_inline_truncated: stderrInline.truncated,
-      stdout_json: stdoutJson,
-      stdout_json_error: stdoutJsonError,
-      stdout_ref: stdoutArtifact
-        ? { uri: stdoutArtifact.uri, rel: stdoutArtifact.rel, bytes: stdoutArtifact.bytes, truncated: stdoutTruncated }
-        : null,
-      stderr_ref: stderrArtifact
-        ? { uri: stderrArtifact.uri, rel: stderrArtifact.rel, bytes: stderrArtifact.bytes, truncated: stderrTruncated }
-        : null,
-    };
   }
 
   getStats() {

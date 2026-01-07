@@ -6,6 +6,8 @@
 
 const crypto = require('node:crypto');
 
+const ToolError = require('../errors/ToolError.cjs');
+
 const DEFAULT_LOCK_TTL_MS = 15 * 60_000;
 const MAX_LOCK_TTL_MS = 24 * 60 * 60_000;
 
@@ -252,39 +254,148 @@ class PolicyService {
 
   assertGitOpsWriteAllowed({ intentType, inputs, policy, now }) {
     if (!policy) {
-      throw new Error('GitOps write intents require policy (inputs.policy or target.policy)');
+      throw ToolError.denied({
+        code: 'POLICY_REQUIRED',
+        message: 'GitOps write intents require policy',
+        hint: 'Provide inputs.policy (mode=operatorless) or configure target.policy.',
+      });
     }
 
     if (policy.mode !== 'operatorless') {
-      throw new Error('policy.mode=operatorless is required for GitOps write intents');
+      throw ToolError.denied({
+        code: 'POLICY_MODE_REQUIRED',
+        message: 'policy.mode=operatorless is required for GitOps write intents',
+        hint: 'Set inputs.policy.mode="operatorless" (or target.policy.mode) and retry.',
+      });
     }
 
     if (policy.allow.intents && !policy.allow.intents.includes(intentType)) {
-      throw new Error(`policy denies intent: ${intentType}`);
+      throw ToolError.denied({
+        code: 'POLICY_DENIED_INTENT',
+        message: `policy denies intent: ${intentType}`,
+        hint: 'Ask an operator to allow this intent in policy.allow.intents or choose an allowed intent.',
+        details: { intent_type: intentType },
+      });
     }
 
     if ((intentType === 'gitops.propose' || intentType === 'gitops.release') && inputs?.merge === true) {
       if (policy.allow.merge === false) {
-        throw new Error('policy denies merge');
+        throw ToolError.denied({
+          code: 'POLICY_DENIED_MERGE',
+          message: 'policy denies merge',
+          hint: 'Set inputs.merge=false or ask an operator to allow merges (policy.allow.merge).',
+        });
       }
     }
 
     if (policy.repo.allowed_remotes) {
       const remote = inputs?.remote ? String(inputs.remote).trim() : 'origin';
       if (!policy.repo.allowed_remotes.includes(remote)) {
-        throw new Error(`policy denies git remote: ${remote}`);
+        throw ToolError.denied({
+          code: 'POLICY_DENIED_REMOTE',
+          message: `policy denies git remote: ${remote}`,
+          hint: 'Use an allowed remote or ask an operator to add it to policy.repo.allowed_remotes.',
+          details: { remote },
+        });
       }
     }
 
     if (policy.kubernetes.allowed_namespaces && inputs?.namespace) {
       const namespace = String(inputs.namespace).trim();
       if (!policy.kubernetes.allowed_namespaces.includes(namespace)) {
-        throw new Error(`policy denies namespace: ${namespace}`);
+        throw ToolError.denied({
+          code: 'POLICY_DENIED_NAMESPACE',
+          message: `policy denies namespace: ${namespace}`,
+          hint: 'Choose an allowed namespace or ask an operator to add it to policy.kubernetes.allowed_namespaces.',
+          details: { namespace },
+        });
       }
     }
 
     if (!isWithinWindowsUtc(now, policy.change_windows)) {
-      throw new Error('policy denies write outside change window');
+      throw ToolError.denied({
+        code: 'POLICY_CHANGE_WINDOW',
+        message: 'policy denies write outside change window',
+        hint: 'Wait for the next change window or ask an operator to adjust policy.change_windows.',
+      });
+    }
+  }
+
+  assertRepoWriteAllowed({ action, inputs, policy, now }) {
+    if (!policy) {
+      return;
+    }
+
+    if (policy.mode !== 'operatorless') {
+      throw ToolError.denied({
+        code: 'POLICY_MODE_REQUIRED',
+        message: 'policy.mode=operatorless is required for repo write operations',
+        hint: 'Set policy.mode="operatorless" (in inputs.policy or target.policy) and retry.',
+        details: { action },
+      });
+    }
+
+    if (policy.repo.allowed_remotes && inputs?.remote !== undefined) {
+      const remote = inputs?.remote ? String(inputs.remote).trim() : 'origin';
+      if (!policy.repo.allowed_remotes.includes(remote)) {
+        throw ToolError.denied({
+          code: 'POLICY_DENIED_REMOTE',
+          message: `policy denies git remote: ${remote}`,
+          hint: 'Use an allowed remote or ask an operator to add it to policy.repo.allowed_remotes.',
+          details: { remote, action },
+        });
+      }
+    }
+
+    if (!isWithinWindowsUtc(now, policy.change_windows)) {
+      throw ToolError.denied({
+        code: 'POLICY_CHANGE_WINDOW',
+        message: 'policy denies write outside change window',
+        hint: 'Wait for the next change window or ask an operator to adjust policy.change_windows.',
+        details: { action },
+      });
+    }
+  }
+
+  assertKubectlWriteAllowed({ inputs, policy, now }) {
+    if (!policy) {
+      return;
+    }
+
+    if (policy.mode !== 'operatorless') {
+      throw ToolError.denied({
+        code: 'POLICY_MODE_REQUIRED',
+        message: 'policy.mode=operatorless is required for kubectl write operations',
+        hint: 'Set policy.mode="operatorless" (in inputs.policy or target.policy) and retry.',
+      });
+    }
+
+    if (policy.kubernetes.allowed_namespaces) {
+      const namespace = inputs?.namespace ? String(inputs.namespace).trim() : '';
+      if (!namespace) {
+        throw ToolError.denied({
+          code: 'POLICY_NAMESPACE_REQUIRED',
+          message: 'policy requires explicit namespace for kubectl write operations',
+          hint: 'Pass -n/--namespace (or use a tool that accepts namespace explicitly) and retry.',
+          details: { allowed_namespaces: policy.kubernetes.allowed_namespaces },
+        });
+      }
+      if (!policy.kubernetes.allowed_namespaces.includes(namespace)) {
+        throw ToolError.denied({
+          code: 'POLICY_DENIED_NAMESPACE',
+          message: `policy denies namespace: ${namespace}`,
+          hint: 'Choose an allowed namespace or ask an operator to add it to policy.kubernetes.allowed_namespaces.',
+          details: { namespace },
+        });
+      }
+    }
+
+    if (!isWithinWindowsUtc(now, policy.change_windows)) {
+      throw ToolError.denied({
+        code: 'POLICY_CHANGE_WINDOW',
+        message: 'policy denies write outside change window',
+        hint: 'Wait for the next change window or ask an operator to adjust policy.change_windows.',
+      });
     }
   }
 
@@ -342,7 +453,13 @@ class PolicyService {
         return next;
       }
 
-      throw new Error(`environment lock is held (key=${key}) until ${lock.expires_at}`);
+      throw ToolError.conflict({
+        code: 'LOCK_HELD',
+        message: `environment lock is held (key=${key}) until ${lock.expires_at}`,
+        hint: 'Wait for the lock to expire, or cancel the conflicting operation before retrying.',
+        details: { key, expires_at: lock.expires_at, holder_trace_id: lock.trace_id },
+        retryable: true,
+      });
     }
 
     const next = {
@@ -387,7 +504,11 @@ class PolicyService {
   async guardGitOpsWrite({ intentType, inputs, traceId, projectName, targetName, repoRoot }) {
     const rawPolicy = this.resolvePolicy(inputs, null);
     if (!rawPolicy) {
-      throw new Error('GitOps write intents require policy (inputs.policy or target.policy)');
+      throw ToolError.denied({
+        code: 'POLICY_REQUIRED',
+        message: 'GitOps write intents require policy',
+        hint: 'Provide inputs.policy (mode=operatorless) or configure target.policy.',
+      });
     }
     const normalized = this.normalizePolicy(rawPolicy);
     this.assertGitOpsWriteAllowed({ intentType, inputs, policy: normalized, now: new Date() });
@@ -397,7 +518,10 @@ class PolicyService {
       : null;
 
     if (!lockKey && normalized.lock.enabled) {
-      throw new Error('policy.lock.enabled requires project/target or repo_root for lock scope');
+      throw ToolError.invalidParams({
+        message: 'policy.lock.enabled requires project/target or repo_root for lock scope',
+        hint: 'Provide project+target (via workspace/project) or pass repo_root so the lock scope can be derived.',
+      });
     }
 
     if (lockKey) {
@@ -409,6 +533,107 @@ class PolicyService {
           intent: intentType,
           project: projectName || undefined,
           target: targetName || undefined,
+          repo_root: repoRoot || undefined,
+        },
+      });
+    }
+
+    return {
+      policy: normalized,
+      lock_key: lockKey,
+      release: async () => {
+        if (!lockKey) {
+          return;
+        }
+        await this.releaseLock({ key: lockKey, traceId });
+      },
+    };
+  }
+
+  async guardRepoWrite({ action, inputs, traceId, projectContext, repoRoot }) {
+    const rawPolicy = this.resolvePolicy(inputs, projectContext);
+    if (!rawPolicy) {
+      return null;
+    }
+
+    const normalized = this.normalizePolicy(rawPolicy);
+    this.assertRepoWriteAllowed({ action, inputs, policy: normalized, now: new Date() });
+
+    const lockKey = normalized.lock.enabled
+      ? this.buildLockKey({
+        projectName: projectContext?.projectName,
+        targetName: projectContext?.targetName,
+        repoRoot,
+      })
+      : null;
+
+    if (!lockKey && normalized.lock.enabled) {
+      throw ToolError.invalidParams({
+        message: 'policy.lock.enabled requires project/target or repo_root for lock scope',
+        hint: 'Provide project+target (via workspace/project) or pass repo_root so the lock scope can be derived.',
+      });
+    }
+
+    if (lockKey) {
+      await this.acquireLock({
+        key: lockKey,
+        traceId,
+        ttlMs: normalized.lock.ttl_ms,
+        meta: {
+          action,
+          project: projectContext?.projectName || undefined,
+          target: projectContext?.targetName || undefined,
+          repo_root: repoRoot || undefined,
+        },
+      });
+    }
+
+    return {
+      policy: normalized,
+      lock_key: lockKey,
+      release: async () => {
+        if (!lockKey) {
+          return;
+        }
+        await this.releaseLock({ key: lockKey, traceId });
+      },
+    };
+  }
+
+  async guardKubectlWrite({ inputs, traceId, projectContext, repoRoot }) {
+    const rawPolicy = this.resolvePolicy(inputs, projectContext);
+    if (!rawPolicy) {
+      return null;
+    }
+
+    const normalized = this.normalizePolicy(rawPolicy);
+    this.assertKubectlWriteAllowed({ inputs, policy: normalized, now: new Date() });
+
+    const lockKey = normalized.lock.enabled
+      ? this.buildLockKey({
+        projectName: projectContext?.projectName,
+        targetName: projectContext?.targetName,
+        repoRoot,
+      })
+      : null;
+
+    if (!lockKey && normalized.lock.enabled) {
+      throw ToolError.invalidParams({
+        message: 'policy.lock.enabled requires project/target or repo_root for lock scope',
+        hint: 'Provide project+target (via workspace/project) or pass repo_root so the lock scope can be derived.',
+      });
+    }
+
+    if (lockKey) {
+      await this.acquireLock({
+        key: lockKey,
+        traceId,
+        ttlMs: normalized.lock.ttl_ms,
+        meta: {
+          action: 'kubectl',
+          namespace: inputs?.namespace || undefined,
+          project: projectContext?.projectName || undefined,
+          target: projectContext?.targetName || undefined,
           repo_root: repoRoot || undefined,
         },
       });
