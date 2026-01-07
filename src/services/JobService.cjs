@@ -1,38 +1,34 @@
 #!/usr/bin/env node
 
-const crypto = require('node:crypto');
-
-const DEFAULT_MAX_JOBS = 500;
-const DEFAULT_TTL_MS = 6 * 60 * 60_000;
-
-const VALID_STATUSES = new Set(['queued', 'running', 'succeeded', 'failed', 'canceled']);
-
-function readPositiveInt(value) {
-  if (value === undefined || value === null || value === '') {
-    return null;
-  }
-  const numberValue = Number(value);
-  if (!Number.isFinite(numberValue) || numberValue <= 0) {
-    return null;
-  }
-  return Math.floor(numberValue);
-}
+const MemoryJobStore = require('../stores/MemoryJobStore.cjs');
+const FileJobStore = require('../stores/FileJobStore.cjs');
 
 function nowIso() {
   return new Date().toISOString();
 }
 
+function resolveStoreKind() {
+  const raw = String(process.env.SENTRYFROGG_JOBS_STORE || process.env.SF_JOBS_STORE || 'memory')
+    .trim()
+    .toLowerCase();
+  if (!raw || raw === 'memory' || raw === 'mem' || raw === 'in-memory') {
+    return 'memory';
+  }
+  if (raw === 'file' || raw === 'durable' || raw === 'persistent' || raw === 'sqlite') {
+    return 'file';
+  }
+  return 'memory';
+}
+
 class JobService {
   constructor(logger) {
     this.logger = logger?.child ? logger.child('jobs') : logger;
-    this.jobs = new Map();
     this.abortControllers = new Map();
 
-    const maxJobsEnv = process.env.SENTRYFROGG_JOBS_MAX || process.env.SF_JOBS_MAX;
-    const ttlEnv = process.env.SENTRYFROGG_JOBS_TTL_MS || process.env.SF_JOBS_TTL_MS;
-
-    this.maxJobs = readPositiveInt(maxJobsEnv) ?? DEFAULT_MAX_JOBS;
-    this.ttlMs = readPositiveInt(ttlEnv) ?? DEFAULT_TTL_MS;
+    const kind = resolveStoreKind();
+    this.store = kind === 'file'
+      ? new FileJobStore(this.logger)
+      : new MemoryJobStore(this.logger);
   }
 
   ensureAbortController(jobId) {
@@ -45,98 +41,36 @@ class JobService {
   }
 
   purgeExpired(now = Date.now()) {
-    for (const [jobId, job] of this.jobs.entries()) {
-      const expiresAt = job?.expires_at_ms;
-      if (expiresAt && expiresAt <= now) {
-        this.jobs.delete(jobId);
+    const removed = this.store.purgeExpired(now);
+    for (const jobId of removed) {
+      this.abortControllers.delete(jobId);
+    }
+  }
+
+  pruneAbortControllers() {
+    for (const jobId of this.abortControllers.keys()) {
+      if (!this.store.has(jobId)) {
         this.abortControllers.delete(jobId);
       }
     }
   }
 
-  touch(jobId) {
-    const job = this.jobs.get(jobId);
-    if (!job) {
-      return null;
-    }
-    this.jobs.delete(jobId);
-    this.jobs.set(jobId, job);
-    return job;
-  }
-
-  enforceCapacity() {
-    while (this.jobs.size > this.maxJobs) {
-      const oldest = this.jobs.keys().next().value;
-      if (!oldest) {
-        break;
-      }
-      this.jobs.delete(oldest);
-      this.abortControllers.delete(oldest);
-    }
-  }
-
-  normalizeStatus(status) {
-    const value = status === undefined || status === null ? null : String(status).trim();
-    if (!value) {
-      return null;
-    }
-    return VALID_STATUSES.has(value) ? value : null;
-  }
-
   create({ kind, trace_id, parent_span_id, provider, progress } = {}) {
-    const jobId = crypto.randomUUID();
-    const createdAt = nowIso();
-    const record = {
-      job_id: jobId,
-      kind: kind ? String(kind) : 'inprocess_task',
-      status: 'queued',
-      trace_id: trace_id || undefined,
-      parent_span_id: parent_span_id || undefined,
-      created_at: createdAt,
-      started_at: null,
-      updated_at: createdAt,
-      ended_at: null,
-      progress: typeof progress === 'number' ? progress : null,
-      artifacts: null,
-      provider: provider && typeof provider === 'object' && !Array.isArray(provider) ? provider : null,
-      error: null,
-      expires_at_ms: Date.now() + this.ttlMs,
-    };
-    this.ensureAbortController(jobId);
-    this.jobs.set(jobId, record);
-    this.enforceCapacity();
+    this.purgeExpired();
+    const record = this.store.create({ kind, trace_id, parent_span_id, provider, progress });
+    this.ensureAbortController(record.job_id);
+    this.pruneAbortControllers();
     return record;
   }
 
   upsert(job) {
-    if (!job || typeof job !== 'object') {
-      return null;
-    }
-    const jobId = typeof job.job_id === 'string' && job.job_id.trim().length ? job.job_id.trim() : null;
-    if (!jobId) {
-      return null;
-    }
-
     this.purgeExpired();
-    const existing = this.jobs.get(jobId);
-    const createdAt = existing?.created_at || job.created_at || nowIso();
-    const updatedAt = nowIso();
-    const status = this.normalizeStatus(job.status) || existing?.status || 'queued';
-
-    const next = {
-      ...(existing || {}),
-      ...job,
-      job_id: jobId,
-      created_at: createdAt,
-      updated_at: updatedAt,
-      status,
-      expires_at_ms: Date.now() + this.ttlMs,
-    };
-
-    this.ensureAbortController(jobId);
-    this.jobs.delete(jobId);
-    this.jobs.set(jobId, next);
-    this.enforceCapacity();
+    const next = this.store.upsert(job);
+    if (!next) {
+      return null;
+    }
+    this.ensureAbortController(next.job_id);
+    this.pruneAbortControllers();
     return next;
   }
 
@@ -145,37 +79,24 @@ class JobService {
       return null;
     }
     this.purgeExpired();
-    const job = this.touch(jobId.trim());
+    const job = this.store.get(jobId.trim());
+    if (job) {
+      this.ensureAbortController(job.job_id);
+    }
     return job || null;
   }
 
   list({ limit, status } = {}) {
     this.purgeExpired();
-    const max = Math.min(readPositiveInt(limit) ?? 50, 200);
-    const filterStatus = this.normalizeStatus(status);
-
-    const out = [];
-    const values = Array.from(this.jobs.values()).reverse();
-    for (const job of values) {
-      if (filterStatus && job.status !== filterStatus) {
-        continue;
-      }
-      out.push(job);
-      if (out.length >= max) {
-        break;
-      }
-    }
-
-    return out;
+    return this.store.list({ limit, status });
   }
 
   forget(jobId) {
-    if (typeof jobId !== 'string' || !jobId.trim().length) {
-      return false;
+    const existed = this.store.forget(jobId);
+    if (existed && typeof jobId === 'string') {
+      this.abortControllers.delete(jobId.trim());
     }
-    const key = jobId.trim();
-    const existed = this.jobs.delete(key);
-    this.abortControllers.delete(key);
+    this.pruneAbortControllers();
     return existed;
   }
 
@@ -194,24 +115,28 @@ class JobService {
       controller.abort(reason || 'canceled');
     }
     const endedAt = nowIso();
-    const next = {
-      ...job,
+    const next = this.store.upsert({
+      job_id: job.job_id,
       status: 'canceled',
       ended_at: job.ended_at || endedAt,
-      updated_at: endedAt,
-    };
-    this.jobs.delete(job.job_id);
-    this.jobs.set(job.job_id, next);
+    });
+    this.pruneAbortControllers();
     return next;
   }
 
   getStats() {
     this.purgeExpired();
-    return {
-      jobs: this.jobs.size,
-      max_jobs: this.maxJobs,
-      ttl_ms: this.ttlMs,
-    };
+    this.pruneAbortControllers();
+    return this.store.getStats();
+  }
+
+  async flush() {
+    await this.store.flush();
+  }
+
+  async cleanup() {
+    await this.flush();
+    this.abortControllers.clear();
   }
 }
 

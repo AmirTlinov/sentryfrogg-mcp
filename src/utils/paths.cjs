@@ -203,6 +203,18 @@ module.exports = {
     }
     return path.join(resolveProfileBaseDir(), 'audit.jsonl');
   },
+  resolveJobsPath() {
+    if (process.env.MCP_JOBS_PATH) {
+      return path.resolve(process.env.MCP_JOBS_PATH);
+    }
+    if (process.env.SENTRYFROGG_JOBS_PATH) {
+      return path.resolve(process.env.SENTRYFROGG_JOBS_PATH);
+    }
+    if (process.env.SF_JOBS_PATH) {
+      return path.resolve(process.env.SF_JOBS_PATH);
+    }
+    return path.join(resolveProfileBaseDir(), 'jobs.json');
+  },
   resolveCacheDir() {
     if (process.env.MCP_CACHE_DIR) {
       return path.resolve(process.env.MCP_CACHE_DIR);

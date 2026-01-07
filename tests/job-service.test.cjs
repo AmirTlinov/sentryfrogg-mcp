@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
 
 const JobService = require('../src/services/JobService.cjs');
 const JobManager = require('../src/managers/JobManager.cjs');
@@ -84,4 +87,40 @@ test('JobManager supports list/cancel/forget for inprocess jobs', async () => {
   const forgotten = await manager.handleAction({ action: 'job_forget', job_id: job.job_id });
   assert.equal(forgotten.success, true);
   assert.equal(forgotten.removed, true);
+});
+
+test('JobService persists jobs with file store (durable mode)', async (t) => {
+  const profilesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sf-jobs-store-'));
+
+  const prevProfilesDir = process.env.MCP_PROFILES_DIR;
+  const prevJobsStore = process.env.SF_JOBS_STORE;
+
+  process.env.MCP_PROFILES_DIR = profilesDir;
+  process.env.SF_JOBS_STORE = 'file';
+
+  t.after(async () => {
+    if (prevProfilesDir === undefined) {
+      delete process.env.MCP_PROFILES_DIR;
+    } else {
+      process.env.MCP_PROFILES_DIR = prevProfilesDir;
+    }
+    if (prevJobsStore === undefined) {
+      delete process.env.SF_JOBS_STORE;
+    } else {
+      process.env.SF_JOBS_STORE = prevJobsStore;
+    }
+    await fs.rm(profilesDir, { recursive: true, force: true });
+  });
+
+  const first = new JobService(loggerStub);
+  const job = first.create({ kind: 'durable_task' });
+  first.upsert({ job_id: job.job_id, status: 'running' });
+  await first.flush();
+
+  const second = new JobService(loggerStub);
+  const loaded = second.get(job.job_id);
+  assert.ok(loaded);
+  assert.equal(loaded.job_id, job.job_id);
+  assert.equal(loaded.kind, 'durable_task');
+  assert.equal(loaded.status, 'running');
 });
