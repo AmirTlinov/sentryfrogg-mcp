@@ -1,0 +1,10 @@
+{
+  "built_at_unix_ms": 1767856997695,
+  "watermark": {
+    "kind": "git",
+    "computed_at_unix_ms": 1767856997695,
+    "git_head": "1a5c3e37005173aaffba41b0b7d25cf21f9ef871",
+    "git_dirty": true,
+    "dirty_hash": 14674195647607069250
+  }
+}

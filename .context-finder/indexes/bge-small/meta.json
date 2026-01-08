@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "model_id": "bge-small",
+  "embedding_mode": "fast",
+  "dimension": 384,
+  "max_chars": 8192,
+  "doc_templates": {
+    "default": "File: {path}\nKind: {doc_kind}\nLanguage: {language}\nChunkType: {chunk_type}\nSymbol: {qualified_name}\n\n{text}",
+    "code": "File: {path}\nLanguage: {language}\nChunkType: {chunk_type}\nSymbol: {qualified_name}\nParent: {parent_scope}\nDoc: {documentation}\nImports:\n{imports}\n\n{text}",
+    "docs": "Doc: {path}\n\n{text}",
+    "config": "Config: {path}\n\n{text}",
+    "test": "Test: {path}\nLanguage: {language}\n\n{text}"
+  },
+  "doc_template_hash": 13738506992047296748
+}

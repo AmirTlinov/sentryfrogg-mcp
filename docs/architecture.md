@@ -1,54 +1,56 @@
+ [LEGEND]
+
+[CONTENT]
 # Architecture
 
 SentryFrogg is a stdio-based MCP server built around a small service layer that wires managers to shared services.
 
 ## High-level structure
 
-- `sentryfrogg_server.cjs`
+- `sentryfrogg_server.ts`
   - defines the MCP tool catalog (`tools/list`)
   - routes `call_tool` requests to manager handlers
   - writes logs to **stderr** to keep MCP stdout clean
-- `src/bootstrap/ServiceBootstrap.cjs`
+- `src/bootstrap/ServiceBootstrap.ts`
   - builds the container and registers services
 - Managers (tool implementations)
-  - `src/managers/PostgreSQLManager.cjs`
-  - `src/managers/SSHManager.cjs`
-  - `src/managers/APIManager.cjs`
-  - `src/managers/StateManager.cjs`
-  - `src/managers/ProjectManager.cjs`
-  - `src/managers/ContextManager.cjs`
-  - `src/managers/CapabilityManager.cjs`
-  - `src/managers/IntentManager.cjs`
-  - `src/managers/EvidenceManager.cjs`
-  - `src/managers/WorkspaceManager.cjs`
-  - `src/managers/RunbookManager.cjs`
-  - `src/managers/AliasManager.cjs`
-  - `src/managers/PresetManager.cjs`
-  - `src/managers/AuditManager.cjs`
-  - `src/managers/PipelineManager.cjs`
+  - `src/managers/PostgreSQLManager.ts`
+  - `src/managers/SSHManager.ts`
+  - `src/managers/APIManager.ts`
+  - `src/managers/StateManager.ts`
+  - `src/managers/ProjectManager.ts`
+  - `src/managers/ContextManager.ts`
+  - `src/managers/CapabilityManager.ts`
+  - `src/managers/IntentManager.ts`
+  - `src/managers/EvidenceManager.ts`
+  - `src/managers/WorkspaceManager.ts`
+  - `src/managers/RunbookManager.ts`
+  - `src/managers/AliasManager.ts`
+  - `src/managers/PresetManager.ts`
+  - `src/managers/AuditManager.ts`
+  - `src/managers/PipelineManager.ts`
 - Shared services
-  - `src/services/ProfileService.cjs` — stores profiles and encrypted secrets
-  - `src/services/Security.cjs` — encryption key lifecycle and crypto helpers
-  - `src/services/Validation.cjs` — canonical input validation
-  - `src/services/Logger.cjs` — minimal logger (stderr)
-  - `src/services/StateService.cjs` — persistent/session state
-  - `src/services/ProjectService.cjs` — project registry
-  - `src/services/ContextService.cjs` — context detection
-  - `src/services/CapabilityService.cjs` — capability registry
-  - `src/services/EvidenceService.cjs` — evidence bundles
-  - `src/services/WorkspaceService.cjs` — workspace summary/diagnostics
-  - `src/services/RunbookService.cjs` — runbook storage
-  - `src/services/AliasService.cjs` — alias storage
-  - `src/services/PresetService.cjs` — preset storage
-  - `src/services/AuditService.cjs` — audit log persistence
-  - `src/services/CacheService.cjs` — file-backed cache
-  - `src/services/ToolExecutor.cjs` — output shaping + `store_as` + trace metadata
+- `src/services/ProfileService.ts` — stores profiles and encrypted secrets
+- `src/services/Security.ts` — encryption key lifecycle and crypto helpers
+- `src/services/Validation.ts` — canonical input validation
+- `src/services/Logger.ts` — minimal logger (stderr)
+- `src/services/StateService.ts` — persistent/session state
+- `src/services/ProjectService.ts` — project registry
+- `src/services/ContextService.ts` — context detection
+- `src/services/CapabilityService.ts` — capability registry
+- `src/services/EvidenceService.ts` — evidence bundles
+- `src/services/WorkspaceService.ts` — workspace summary/diagnostics
+- `src/services/RunbookService.ts` — runbook storage
+- `src/services/AliasService.ts` — alias storage
+- `src/services/PresetService.ts` — preset storage
+- `src/services/AuditService.ts` — audit log persistence
+- `src/services/CacheService.ts` — file-backed cache
+- `src/services/ToolExecutor.ts` — output shaping + `store_as` + trace metadata
 
 ## Profiles, storage, and encryption
 
 Local state (base directory):
 - Default: `${XDG_STATE_HOME}/sentryfrogg` or `~/.local/state/sentryfrogg`.
-- Legacy store usage is opt-in via `MCP_LEGACY_STORE=1`.
 
 Bundles:
 - Default `runbooks.json` / `capabilities.json` live in the repository and are safe to ship.
@@ -99,7 +101,6 @@ Environment variables:
 - `MCP_PRESETS_PATH` — explicit path to `presets.json`
 - `MCP_AUDIT_PATH` — explicit path to `audit.jsonl`
 - `MCP_CACHE_DIR` — directory for cache files
-- `MCP_LEGACY_STORE` — set to `1` to use legacy store next to entrypoint
 - `ENCRYPTION_KEY` — supply a stable encryption key (recommended for shared environments)
 - `LOG_LEVEL` — `error` / `warn` / `info` / `debug`
 - `SENTRYFROGG_UNSAFE_LOCAL` / `SF_UNSAFE_LOCAL` — enable `mcp_local` (local exec + filesystem). Disabled by default.

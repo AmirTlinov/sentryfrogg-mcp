@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 # Contributing
 
 Thanks for taking the time to contribute to SentryFrogg.

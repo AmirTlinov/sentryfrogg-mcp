@@ -2,28 +2,28 @@
   "generated_at": "2025-10-13T11:18:45Z",
   "entries": [
     {
-      "file": "src/services/Validation.cjs",
+      "file": "src/services/Validation.ts",
       "symbol": "ensureString",
       "cyclomatic": 3,
       "cognitive": 3,
       "notes": "Trim flag added; two guard branches."
     },
     {
-      "file": "src/services/Validation.cjs",
+      "file": "src/services/Validation.ts",
       "symbol": "ensureOptionalString",
       "cyclomatic": 2,
       "cognitive": 2,
       "notes": "Delegates to ensureString with preserved options."
     },
     {
-      "file": "src/services/Validation.cjs",
+      "file": "src/services/Validation.ts",
       "symbol": "ensureConnectionProfile",
       "cyclomatic": 5,
       "cognitive": 5,
       "notes": "Password path updated without structural change; limits remain ≤10/≤15."
     },
     {
-      "file": "tests/validation.test.cjs",
+      "file": "tests/validation.test.ts",
       "symbol": "module",
       "cyclomatic": 1,
       "cognitive": 1,

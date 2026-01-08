@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 # 📋 CHANGELOG
 
 ## [6.4.0] - 2025-12-23 - Unsafe local mode (opt-in)
@@ -97,7 +100,7 @@ Patch-релиз без изменений контрактов; улучшен�
   "mcpServers": {
     "sentryfrogg": {
       "command": "node",
-      "args": ["path/to/sentryfrogg_server.cjs"]
+      "args": ["path/to/dist/sentryfrogg_server.js"]
     }
   }
 }
@@ -188,7 +191,7 @@ Patch-релиз без изменений контрактов; улучшен�
   "mcpServers": {
     "postgresql-api-ssh": {
       "command": "node",
-      "args": ["path/to/sentryfrogg_server.cjs"]
+      "args": ["path/to/dist/sentryfrogg_server.js"]
     }
   }
 }
@@ -198,7 +201,7 @@ Patch-релиз без изменений контрактов; улучшен�
   "mcpServers": {
     "psql-ssh-api": {
       "command": "node", 
-      "args": ["path/to/sentryfrogg_server.cjs"]
+      "args": ["path/to/dist/sentryfrogg_server.js"]
     }
   }
 }
@@ -238,15 +241,15 @@ Patch-релиз без изменений контрактов; улучшен�
 
 #### 🏗️ Новая модульная структура
 ```
-sentryfrogg_server.cjs (275 строк) - Главный сервер
+sentryfrogg_server.ts (275 строк) - Главный сервер
 src/
-├── constants/index.cjs   - Конфигурация и константы
-├── logger/index.cjs      - Структурированное логирование  
-├── security/index.cjs    - AES-256-CBC шифрование
-├── validation/index.cjs  - Валидация и защита от инъекций
-├── database/postgresql.cjs - Безопасная работа с PostgreSQL
-├── ssh/index.cjs         - Защита от command injection
-└── api/index.cjs         - SSRF защита для API запросов
+├── constants/index.ts   - Конфигурация и константы
+├── logger/index.ts      - Структурированное логирование  
+├── security/index.ts    - AES-256-CBC шифрование
+├── validation/index.ts  - Валидация и защита от инъекций
+├── database/postgresql.ts - Безопасная работа с PostgreSQL
+├── ssh/index.ts         - Защита от command injection
+└── api/index.ts         - SSRF защита для API запросов
 ```
 
 #### 🔄 Новые возможности PostgreSQL Manager

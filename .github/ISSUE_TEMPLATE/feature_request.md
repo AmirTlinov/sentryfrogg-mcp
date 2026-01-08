@@ -1,9 +1,11 @@
+[LEGEND]
+
+[CONTENT]
 ---
 name: Feature request
 about: Suggest an idea for this project
 labels: enhancement
 ---
-
 ## Problem
 
 What problem are you trying to solve?
@@ -20,4 +22,3 @@ If relevant, include:
 - MCP client details
 - Example tool calls / schemas
 - Constraints (security, compliance, environments)
-

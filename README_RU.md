@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 # SentryFrogg MCP Server
 
 [English](README.md) • [Docs](docs/README.md) • [Конфигурация MCP](mcp_config.md) • [Интеграционный стенд](integration/README.md) • [История изменений](CHANGELOG.md)
@@ -59,6 +62,7 @@ SentryFrogg — MCP-сервер (stdio), который даёт LLM-агент
 2. Зарегистрируйте сервер в MCP-клиенте (stdio): см. `mcp_config.md`
 3. Запустите сервер: `npm start`
 4. В MCP-клиенте вызовите `help`, затем `profile_upsert` для PostgreSQL/SSH
+5. Для автономных write-сценариев настройте `policy_profiles` (см. `docs/tools.md`)
 
 ## Инструменты
 - `help`

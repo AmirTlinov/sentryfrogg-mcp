@@ -1,0 +1,17 @@
+protocol_version: 1
+project:
+  name: "SentryFrogg"
+  slug: "sentryfrogg"
+  language: "node"
+forge:
+  skill: "ai-first-project-forge"
+  skeleton_version: "0.7.6"
+  generated_at_utc: "2026-01-08T04:36:09+00:00"
+docs:
+  format:
+    legend_header: "[LEGEND]"
+    content_header: "[CONTENT]"
+gates:
+  golden_path:
+    - "./tools/doctor"
+    - "./tools/gate"

@@ -29,4 +29,10 @@ if [[ ! -d "$ROOT_DIR/node_modules" || "$CURRENT_HASH" != "$DESIRED_HASH" ]]; th
 fi
 
 cd "$ROOT_DIR"
-exec node sentryfrogg_server.cjs "$@"
+if [[ -f "$ROOT_DIR/dist/sentryfrogg_server.js" ]]; then
+  exec node dist/sentryfrogg_server.js "$@"
+fi
+
+echo "$LOG_PREFIX dist не найден, собираю TypeScript" >&2
+npm run build
+exec node dist/sentryfrogg_server.js "$@"

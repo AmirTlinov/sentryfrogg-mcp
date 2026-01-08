@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 # Public Release Checklist
 
 This project can create local state files (`profiles.json`, `.mcp_profiles.key`) that must never be committed.

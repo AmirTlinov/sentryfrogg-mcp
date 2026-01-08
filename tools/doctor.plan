@@ -1,0 +1,7 @@
+# SentryFrogg — doctor.plan
+# Lines are executed in a shell, in order.
+
+node --version
+npm --version
+
+

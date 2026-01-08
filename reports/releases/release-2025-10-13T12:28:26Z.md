@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 ## Release Summary (2025-10-13T12:28:26Z)
 
 - Runtime commit: `7cc757ff` (7cc757ff8954ef85cbb140535f9cbaf23c10dc2c)

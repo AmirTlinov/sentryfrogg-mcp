@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 # Security Policy
 
 SentryFrogg is an MCP server capable of executing SQL, SSH commands, and HTTP requests. Treat it as privileged infrastructure software.

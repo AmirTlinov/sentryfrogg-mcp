@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 # Tool Reference
 
 SentryFrogg exposes a small set of MCP tools over stdio.
@@ -149,6 +152,36 @@ Project example:
 }
 ```
 
+Policy profiles (autonomy-ready, optional):
+
+```json
+{
+  "action": "project_upsert",
+  "name": "myapp",
+  "project": {
+    "policy_profiles": {
+      "autonomy": {
+        "mode": "operatorless",
+        "repo": { "allowed_remotes": ["origin"] },
+        "lock": { "enabled": false }
+      }
+    },
+    "targets": {
+      "prod": {
+        "ssh_profile": "myapp-prod-ssh",
+        "env_profile": "myapp-prod-env",
+        "policy": "autonomy"
+      }
+    }
+  }
+}
+```
+
+Notes:
+- `target.policy` can be an inline policy object or a profile name (`policy_profiles.<name>`).
+- You can also select a profile per intent: `inputs.policy_profile_name: "autonomy"`.
+- Explicit global opt-in is supported via `SENTRYFROGG_AUTONOMY_POLICY=operatorless`.
+
 Activate project (persists across restarts):
 
 ```json
@@ -183,7 +216,7 @@ Unified workspace UX: one-call summary, suggestions, and diagnostics.
 Key actions:
 - `summary` / `suggest` / `diagnose`
 - `run` (execute runbook by name)
-- `store_status` / `migrate_legacy`
+- `store_status`
 - `stats`
 
 Summary example:
@@ -222,15 +255,8 @@ Intent apply (write/mixed):
 { "action": "run", "intent_type": "k8s.apply", "inputs": { "overlay": "/repo/overlays/prod" }, "apply": true }
 ```
 
-Legacy migration (dry-run by default):
-
-```json
-{ "action": "migrate_legacy" }
-```
-
 Notes:
 - Suggestions are derived from context tags and available runbooks/capabilities.
-- `migrate_legacy` accepts `apply`, `cleanup`, `include_dirs`, `overwrite` flags.
 - `summary`/`suggest` accept `format` (`full` | `compact` | `actions`) and `include_call` (default true).
 
 ## `mcp_capability`

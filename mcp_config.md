@@ -1,6 +1,9 @@
+ [LEGEND]
+
+[CONTENT]
 # MCP Configuration
 
-SentryFrogg is a **stdio-based** Model Context Protocol (MCP) server. Your MCP client should spawn `node` and point it at `sentryfrogg_server.cjs`.
+SentryFrogg is a **stdio-based** Model Context Protocol (MCP) server. Your MCP client should spawn `node` and point it at `dist/sentryfrogg_server.js`.
 
 See also:
 - `docs/tools.md` (tool reference + examples)
@@ -13,7 +16,7 @@ See also:
   "mcpServers": {
     "sentryfrogg": {
       "command": "node",
-      "args": ["/absolute/path/to/sentryfrogg_server.cjs"]
+      "args": ["/absolute/path/to/dist/sentryfrogg_server.js"]
     }
   }
 }
@@ -28,9 +31,6 @@ Notes:
 By default, SentryFrogg stores local state in an OS-friendly location:
 - `${XDG_STATE_HOME}/sentryfrogg` when `XDG_STATE_HOME` is set, otherwise
 - `~/.local/state/sentryfrogg` (HOME fallback).
-
-Compatibility note:
-- Legacy store usage is **opt-in** via `MCP_LEGACY_STORE=1`. Default storage stays in the XDG state directory.
 
 Store files:
 - `profiles.json` (encrypted profile store)
@@ -60,7 +60,6 @@ Recommended environment variables:
 - `MCP_PRESETS_PATH`: explicit path to `presets.json`
 - `MCP_AUDIT_PATH`: explicit path to `audit.jsonl`
 - `MCP_CACHE_DIR`: directory for cache files
-- `MCP_LEGACY_STORE`: set to `1` to use legacy store next to the entrypoint
 - `ENCRYPTION_KEY`: provide a stable key (recommended for shared/team environments)
   - accepted formats: **64 hex chars** (32 bytes) / **32 raw chars** / base64 (decoded as bytes)
 - `LOG_LEVEL`: server logging level (`error`, `warn`, `info`, `debug`); logs are written to **stderr** to keep MCP stdout clean

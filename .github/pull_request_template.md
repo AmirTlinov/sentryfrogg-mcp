@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 ## What changed?
 
 ## Why?

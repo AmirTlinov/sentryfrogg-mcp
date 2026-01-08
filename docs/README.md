@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 # Documentation
 
 This directory contains the long-form documentation for SentryFrogg.

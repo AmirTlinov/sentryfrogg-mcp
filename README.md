@@ -61,11 +61,11 @@ Export Postgres to SFTP:
    {
      "mcpServers": {
        "sentryfrogg": {
-         "command": "node",
-         "args": ["/absolute/path/to/sentryfrogg_server.cjs"]
-       }
-     }
-   }
+        "command": "node",
+        "args": ["/absolute/path/to/dist/sentryfrogg_server.js"]
+      }
+    }
+  }
    ```
 
    More details: `mcp_config.md`.

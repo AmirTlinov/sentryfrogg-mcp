@@ -1,3 +1,6 @@
+ [LEGEND]
+
+[CONTENT]
 # Integration Stacks
 
 This directory provides local Docker targets for integration testing of the MCP tools.
@@ -10,7 +13,7 @@ This directory provides local Docker targets for integration testing of the MCP 
 
 ### Smoke environment overrides
 
-`integration/smoke.cjs` supports:
+`integration/smoke.ts` supports:
 - `SF_PG_URI` (default: `postgresql://mcp_user:mcp_pass@127.0.0.1:5432/mcp_demo`)
 - `SF_SSH_HOST` (default: `127.0.0.1`)
 - `SF_SSH_PORT` (default: `2222`)

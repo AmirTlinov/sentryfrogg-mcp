@@ -2,14 +2,21 @@
   "name": "sentryfrogg-mcp",
   "version": "6.4.0",
   "description": "Enterprise MCP server for PostgreSQL, SSH and HTTP operations under the SentryFrogg brand",
-  "main": "sentryfrogg_server.cjs",
+  "main": "dist/sentryfrogg_server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node sentryfrogg_server.cjs",
-    "dev": "node sentryfrogg_server.cjs",
-    "check": "node --check sentryfrogg_server.cjs",
-    "test": "node --test",
-    "smoke": "node integration/smoke.cjs"
+    "build": "tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "ensure:build": "node -e \"const fs=require('node:fs'); const path=require('node:path'); const { spawnSync }=require('node:child_process'); const dist=path.join(process.cwd(),'dist','sentryfrogg_server.js'); if (fs.existsSync(dist)) process.exit(0); const res=spawnSync('npm',['run','build'],{stdio:'inherit'}); process.exit(res.status===null?1:res.status);\"",
+    "prestart": "npm run ensure:build",
+    "start": "node dist/sentryfrogg_server.js",
+    "predev": "npm run ensure:build",
+    "dev": "node dist/sentryfrogg_server.js",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build:test && node --test dist/tests/index.js",
+    "smoke": "npm run build:test && node dist/integration/smoke.js",
+    "prepack": "npm run build",
+    "postinstall": "npm run ensure:build"
   },
   "keywords": [
     "mcp",
@@ -40,7 +47,14 @@
     "ajv": "^8.17.1",
     "node-fetch": "^3.3.2",
     "pg": "^8.11.3",
-    "ssh2": "^1.15.0"
+    "ssh2": "^1.15.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/pg": "^8.11.6",
+    "@types/ssh2": "^1.15.0",
+    "typescript": "^5.4.5"
   },
   "engines": {
     "node": ">=18.0.0",
@@ -55,8 +69,10 @@
   },
   "homepage": "https://github.com/AmirTlinov/sentryfrogg-mcp#readme",
   "files": [
-    "sentryfrogg_server.cjs",
+    "sentryfrogg_server.ts",
+    "dist/",
     "src/",
+    "scripts/",
     "package.json",
     "README.md",
     "CHANGELOG.md",
