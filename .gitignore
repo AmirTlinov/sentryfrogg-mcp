@@ -145,6 +145,10 @@ tmp/
 temp/
 .tmp/
 
+# Local AI indexes
+.context-finder/
+.branchmind_rust/
+
 # Local configuration files
 config.local.json
 pg_config.json 
