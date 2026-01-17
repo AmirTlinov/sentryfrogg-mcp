@@ -43,7 +43,7 @@
   "author": "AmirTlinov",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "ajv": "^8.17.1",
     "node-fetch": "^3.3.2",
     "pg": "^8.11.3",
