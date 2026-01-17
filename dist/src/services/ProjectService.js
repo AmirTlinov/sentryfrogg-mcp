@@ -8,6 +8,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const fs = require('fs/promises');
 const { resolveProjectsPath } = require('../utils/paths');
 const { atomicWriteTextFile } = require('../utils/fsAtomic');
+const ToolError = require('../errors/ToolError');
 class ProjectService {
     constructor(logger) {
         this.logger = logger.child('projects');
@@ -33,8 +34,14 @@ class ProjectService {
             const raw = await fs.readFile(this.filePath, 'utf8');
             const parsed = JSON.parse(raw);
             for (const [name, project] of Object.entries(parsed || {})) {
-                this.validateProject(project);
-                this.projects.set(name, project);
+                try {
+                    this.validateProject(project);
+                    this.projects.set(name, project);
+                }
+                catch (error) {
+                    this.stats.errors += 1;
+                    this.logger.warn('Skipping invalid project entry during load', { name, error: error.message });
+                }
             }
             this.stats.loaded = this.projects.size;
         }
@@ -52,14 +59,14 @@ class ProjectService {
     }
     validatePolicyObject(policy, labelPrefix) {
         if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
-            throw new Error(`${labelPrefix} must be an object`);
+            throw ToolError.invalidParams({ field: labelPrefix, message: `${labelPrefix} must be an object` });
         }
         const allowString = (value, label) => {
             if (value === undefined || value === null) {
                 return;
             }
             if (typeof value !== 'string' || value.trim().length === 0) {
-                throw new Error(`${label} must be a non-empty string`);
+                throw ToolError.invalidParams({ field: label, message: `${label} must be a non-empty string` });
             }
         };
         allowString(policy.mode, `${labelPrefix}.mode`);
@@ -68,53 +75,53 @@ class ProjectService {
                 return;
             }
             if (typeof value !== 'object' || Array.isArray(value)) {
-                throw new Error(`${label} must be an object`);
+                throw ToolError.invalidParams({ field: label, message: `${label} must be an object` });
             }
         };
         allowOptionalObject(policy.allow, `${labelPrefix}.allow`);
         if (policy.allow?.intents !== undefined && policy.allow?.intents !== null) {
             if (!Array.isArray(policy.allow.intents)) {
-                throw new Error(`${labelPrefix}.allow.intents must be an array`);
+                throw ToolError.invalidParams({ field: `${labelPrefix}.allow.intents`, message: `${labelPrefix}.allow.intents must be an array` });
             }
         }
         allowOptionalObject(policy.repo, `${labelPrefix}.repo`);
         if (policy.repo?.allowed_remotes !== undefined && policy.repo?.allowed_remotes !== null) {
             if (!Array.isArray(policy.repo.allowed_remotes)) {
-                throw new Error(`${labelPrefix}.repo.allowed_remotes must be an array`);
+                throw ToolError.invalidParams({ field: `${labelPrefix}.repo.allowed_remotes`, message: `${labelPrefix}.repo.allowed_remotes must be an array` });
             }
         }
         allowOptionalObject(policy.kubernetes, `${labelPrefix}.kubernetes`);
         if (policy.kubernetes?.allowed_namespaces !== undefined && policy.kubernetes?.allowed_namespaces !== null) {
             if (!Array.isArray(policy.kubernetes.allowed_namespaces)) {
-                throw new Error(`${labelPrefix}.kubernetes.allowed_namespaces must be an array`);
+                throw ToolError.invalidParams({ field: `${labelPrefix}.kubernetes.allowed_namespaces`, message: `${labelPrefix}.kubernetes.allowed_namespaces must be an array` });
             }
         }
         if (policy.change_windows !== undefined && policy.change_windows !== null) {
             if (!Array.isArray(policy.change_windows)) {
-                throw new Error(`${labelPrefix}.change_windows must be an array`);
+                throw ToolError.invalidParams({ field: `${labelPrefix}.change_windows`, message: `${labelPrefix}.change_windows must be an array` });
             }
         }
         allowOptionalObject(policy.lock, `${labelPrefix}.lock`);
         if (policy.lock?.enabled !== undefined && typeof policy.lock.enabled !== 'boolean') {
-            throw new Error(`${labelPrefix}.lock.enabled must be a boolean`);
+            throw ToolError.invalidParams({ field: `${labelPrefix}.lock.enabled`, message: `${labelPrefix}.lock.enabled must be a boolean` });
         }
         if (policy.lock?.ttl_ms !== undefined && policy.lock.ttl_ms !== null) {
             const numeric = Number(policy.lock.ttl_ms);
             if (!Number.isFinite(numeric) || numeric <= 0) {
-                throw new Error(`${labelPrefix}.lock.ttl_ms must be a positive number`);
+                throw ToolError.invalidParams({ field: `${labelPrefix}.lock.ttl_ms`, message: `${labelPrefix}.lock.ttl_ms must be a positive number` });
             }
         }
     }
     validateTarget(target) {
         if (!target || typeof target !== 'object' || Array.isArray(target)) {
-            throw new Error('project.targets entries must be objects');
+            throw ToolError.invalidParams({ field: 'project.targets', message: 'project.targets entries must be objects' });
         }
         const allowString = (value, label) => {
             if (value === undefined || value === null) {
                 return;
             }
             if (typeof value !== 'string' || value.trim().length === 0) {
-                throw new Error(`${label} must be a non-empty string`);
+                throw ToolError.invalidParams({ field: label, message: `${label} must be a non-empty string` });
             }
         };
         const policy = target.policy;
@@ -137,39 +144,39 @@ class ProjectService {
     }
     validateProject(project) {
         if (!project || typeof project !== 'object' || Array.isArray(project)) {
-            throw new Error('project must be an object');
+            throw ToolError.invalidParams({ field: 'project', message: 'project must be an object' });
         }
         if (project.description !== undefined && (typeof project.description !== 'string')) {
-            throw new Error('project.description must be a string');
+            throw ToolError.invalidParams({ field: 'project.description', message: 'project.description must be a string' });
         }
         if (project.default_target !== undefined) {
             if (typeof project.default_target !== 'string' || project.default_target.trim().length === 0) {
-                throw new Error('project.default_target must be a non-empty string');
+                throw ToolError.invalidParams({ field: 'project.default_target', message: 'project.default_target must be a non-empty string' });
             }
         }
         if (project.repo_root !== undefined && project.repo_root !== null) {
             if (typeof project.repo_root !== 'string' || project.repo_root.trim().length === 0) {
-                throw new Error('project.repo_root must be a non-empty string');
+                throw ToolError.invalidParams({ field: 'project.repo_root', message: 'project.repo_root must be a non-empty string' });
             }
         }
         if (project.policy_profiles !== undefined && project.policy_profiles !== null) {
             if (typeof project.policy_profiles !== 'object' || Array.isArray(project.policy_profiles)) {
-                throw new Error('project.policy_profiles must be an object');
+                throw ToolError.invalidParams({ field: 'project.policy_profiles', message: 'project.policy_profiles must be an object' });
             }
             for (const [name, policy] of Object.entries(project.policy_profiles)) {
                 if (typeof name !== 'string' || name.trim().length === 0) {
-                    throw new Error('project.policy_profiles keys must be non-empty strings');
+                    throw ToolError.invalidParams({ field: 'project.policy_profiles', message: 'project.policy_profiles keys must be non-empty strings' });
                 }
                 this.validatePolicyObject(policy, `project.policy_profiles.${name}`);
             }
         }
         if (project.targets !== undefined) {
             if (!project.targets || typeof project.targets !== 'object' || Array.isArray(project.targets)) {
-                throw new Error('project.targets must be an object');
+                throw ToolError.invalidParams({ field: 'project.targets', message: 'project.targets must be an object' });
             }
             for (const [name, target] of Object.entries(project.targets)) {
                 if (typeof name !== 'string' || name.trim().length === 0) {
-                    throw new Error('project.targets keys must be non-empty strings');
+                    throw ToolError.invalidParams({ field: 'project.targets', message: 'project.targets keys must be non-empty strings' });
                 }
                 this.validateTarget(target);
             }
@@ -177,7 +184,7 @@ class ProjectService {
     }
     normalizeName(name) {
         if (typeof name !== 'string' || name.trim().length === 0) {
-            throw new Error('project name must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'name', message: 'project name must be a non-empty string' });
         }
         return name.trim();
     }
@@ -206,7 +213,12 @@ class ProjectService {
         const trimmed = this.normalizeName(name);
         const entry = this.projects.get(trimmed);
         if (!entry) {
-            throw new Error(`project '${trimmed}' not found`);
+            throw ToolError.notFound({
+                code: 'PROJECT_NOT_FOUND',
+                message: `project '${trimmed}' not found`,
+                hint: 'Use action=project_list to see known projects.',
+                details: { name: trimmed },
+            });
         }
         return { success: true, project: { name: trimmed, ...entry } };
     }
@@ -229,7 +241,12 @@ class ProjectService {
         await this.ensureReady();
         const trimmed = this.normalizeName(name);
         if (!this.projects.delete(trimmed)) {
-            throw new Error(`project '${trimmed}' not found`);
+            throw ToolError.notFound({
+                code: 'PROJECT_NOT_FOUND',
+                message: `project '${trimmed}' not found`,
+                hint: 'Use action=project_list to see known projects.',
+                details: { name: trimmed },
+            });
         }
         await this.persist();
         return { success: true, project: trimmed };

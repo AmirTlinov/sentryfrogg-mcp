@@ -44,6 +44,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
  * - Testable: injectable fetch implementation.
  */
 const { setTimeout: sleepTimeout } = require('timers/promises');
+const ToolError = require('../errors/ToolError');
 let fetchPromise = null;
 async function defaultFetch(...args) {
     if (globalThis.fetch) {
@@ -58,9 +59,24 @@ async function defaultFetch(...args) {
 function normalizeBaseUrl(raw) {
     const value = String(raw || '').trim();
     if (!value) {
-        throw new Error('vault addr is required');
+        throw ToolError.invalidParams({
+            field: 'addr',
+            message: 'vault addr is required',
+            hint: 'Set profile.data.addr, e.g. \"https://vault.example.com\".',
+        });
     }
-    const url = new URL(value);
+    let url;
+    try {
+        url = new URL(value);
+    }
+    catch (error) {
+        throw ToolError.invalidParams({
+            field: 'addr',
+            message: 'Invalid vault addr URL',
+            hint: 'Expected a valid URL, e.g. \"https://vault.example.com\".',
+            details: { addr: value },
+        });
+    }
     url.hash = '';
     url.search = '';
     // Keep path in case Vault is proxied under a prefix, but normalize trailing slash.
@@ -134,7 +150,22 @@ class VaultClient {
                     const message = details
                         ? `Vault request failed (${response.status}): ${details}`
                         : `Vault request failed (${response.status})`;
-                    const error = new Error(message);
+                    let error;
+                    if (response.status === 401 || response.status === 403) {
+                        error = ToolError.denied({ code: 'VAULT_DENIED', message });
+                    }
+                    else if (response.status === 404) {
+                        error = ToolError.notFound({ code: 'VAULT_NOT_FOUND', message });
+                    }
+                    else if (response.status === 429 || response.status >= 500) {
+                        error = ToolError.retryable({ code: 'VAULT_RETRYABLE', message, hint: 'Retry later or increase timeout/retries.' });
+                    }
+                    else if (response.status >= 400 && response.status < 500) {
+                        error = ToolError.invalidParams({ field: 'vault', message });
+                    }
+                    else {
+                        error = ToolError.internal({ code: 'VAULT_REQUEST_FAILED', message });
+                    }
                     error.status = response.status;
                     throw error;
                 }
@@ -143,7 +174,10 @@ class VaultClient {
             catch (error) {
                 const isAbort = error && (error.name === 'AbortError' || error.code === 'ABORT_ERR');
                 const status = error?.status;
-                const retryable = isAbort || (status === undefined && attempt <= maxRetries);
+                const isRetryableKind = ToolError.isToolError(error) && (error.kind === 'retryable' || error.retryable === true);
+                const retryable = isAbort
+                    || (isRetryableKind && attempt <= maxRetries)
+                    || (status === undefined && attempt <= maxRetries);
                 if (!retryable) {
                     throw error;
                 }
@@ -203,14 +237,21 @@ class VaultClient {
             return String(profile.token);
         }
         if (!this.canApprole(profile)) {
-            throw new Error('Vault token is required for this operation');
+            throw ToolError.invalidParams({
+                field: 'token',
+                message: 'Vault token is required for this operation',
+                hint: 'Set profile.secrets.token, or configure AppRole (role_id + secret_id).',
+            });
         }
         return this.loginApprole(profile, options);
     }
     async loginApprole(profile, options = {}) {
         const profileName = profile.profile_name;
         if (!profileName) {
-            throw new Error('Vault profile_name is required for AppRole login');
+            throw ToolError.internal({
+                code: 'VAULT_PROFILE_NAME_MISSING',
+                message: 'Vault profile_name is required for AppRole login',
+            });
         }
         const cached = this.loginInFlight.get(profileName);
         if (cached) {
@@ -230,7 +271,11 @@ class VaultClient {
             });
             const token = payload?.auth?.client_token;
             if (!token || typeof token !== 'string' || token.trim().length === 0) {
-                throw new Error('Vault AppRole login returned empty client_token');
+                throw ToolError.internal({
+                    code: 'VAULT_APPROLE_EMPTY_TOKEN',
+                    message: 'Vault AppRole login returned empty client_token',
+                    hint: 'Verify AppRole credentials (role_id/secret_id) and Vault auth configuration.',
+                });
             }
             await this.profileService.setProfile(profileName, {
                 type: 'vault',
@@ -252,17 +297,29 @@ class VaultClient {
         // ref format: <mount>/<path>#<key>
         const [pathPart, keyPart] = trimmed.split('#');
         if (!pathPart || !keyPart) {
-            throw new Error('vault kv2 ref must be in "<mount>/<path>#<key>" form');
+            throw ToolError.invalidParams({
+                field: 'ref',
+                message: 'vault kv2 ref must be in "<mount>/<path>#<key>" form',
+                hint: 'Example: \"secret/my/app#token\".',
+            });
         }
         const parts = pathPart.split('/').filter(Boolean);
         if (parts.length < 2) {
-            throw new Error('vault kv2 ref must include mount and path');
+            throw ToolError.invalidParams({
+                field: 'ref',
+                message: 'vault kv2 ref must include mount and path',
+                hint: 'Example: \"secret/my/app#token\".',
+            });
         }
         const mount = parts[0];
         const secretPath = parts.slice(1).join('/');
         const key = keyPart.trim();
         if (!key) {
-            throw new Error('vault kv2 ref key must be non-empty');
+            throw ToolError.invalidParams({
+                field: 'ref',
+                message: 'vault kv2 ref key must be non-empty',
+                hint: 'Example: \"secret/my/app#token\".',
+            });
         }
         return { mount, secretPath, key };
     }
@@ -295,14 +352,27 @@ class VaultClient {
         }
         const data = payload?.data?.data;
         if (!data || typeof data !== 'object' || Array.isArray(data)) {
-            throw new Error('Vault kv2 response has invalid shape (missing data.data)');
+            throw ToolError.internal({
+                code: 'VAULT_KV2_INVALID_SHAPE',
+                message: 'Vault kv2 response has invalid shape (missing data.data)',
+            });
         }
         if (!Object.prototype.hasOwnProperty.call(data, key)) {
-            throw new Error(`Vault secret key not found: ${key}`);
+            throw ToolError.notFound({
+                code: 'VAULT_SECRET_KEY_NOT_FOUND',
+                message: `Vault secret key not found: ${key}`,
+                hint: 'Verify the key exists in the KV v2 secret, or update the ref.',
+                details: { key },
+            });
         }
         const value = data[key];
         if (value === undefined || value === null) {
-            throw new Error(`Vault secret key is null: ${key}`);
+            throw ToolError.conflict({
+                code: 'VAULT_SECRET_KEY_NULL',
+                message: `Vault secret key is null: ${key}`,
+                hint: 'Ensure the secret value is set (non-null) in Vault.',
+                details: { key },
+            });
         }
         return String(value);
     }

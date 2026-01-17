@@ -5,6 +5,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 /**
  * 🎛️ Preset manager.
  */
+const { unknownActionError } = require('../utils/toolErrors');
+const PRESET_ACTIONS = ['preset_upsert', 'preset_get', 'preset_list', 'preset_delete'];
 class PresetManager {
     constructor(logger, presetService) {
         this.logger = logger.child('preset');
@@ -22,7 +24,7 @@ class PresetManager {
             case 'preset_delete':
                 return this.presetService.deletePreset(args.tool, args.name);
             default:
-                throw new Error(`Unknown preset action: ${action}`);
+                throw unknownActionError({ tool: 'preset', action, knownActions: PRESET_ACTIONS });
         }
     }
     getStats() {

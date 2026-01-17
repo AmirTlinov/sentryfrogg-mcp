@@ -32,9 +32,10 @@ function parseToolText(resp) {
     return resp.result.content[0].text;
 }
 function parseTraceId(text) {
-    const traceLine = text.split('\n').find((line) => line.startsWith('N: trace_id:'));
-    assert.ok(traceLine, `expected trace_id in output, got:\n${text}`);
-    return traceLine.replace('N: trace_id:', '').trim();
+    const envelope = JSON.parse(text);
+    const traceId = envelope?.trace?.trace_id;
+    assert.ok(traceId, `expected trace.trace_id in output, got:\n${text}`);
+    return traceId;
 }
 async function writeKubectlStub(dir) {
     const scriptPath = path.join(dir, 'kubectl');

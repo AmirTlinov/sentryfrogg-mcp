@@ -3,6 +3,7 @@
 // @ts-nocheck
 Object.defineProperty(exports, "__esModule", { value: true });
 const { getPathValue } = require('./dataPath');
+const ToolError = require('../errors/ToolError');
 function resolveEmptyDefault(output) {
     if (output && typeof output === 'object') {
         if (output.map) {
@@ -75,7 +76,7 @@ function applyOutputTransform(value, output) {
     if (output.map) {
         if (!Array.isArray(current)) {
             if (required) {
-                throw new Error('Output map expects an array result');
+                throw ToolError.invalidParams({ field: 'output.map', message: 'Output map expects an array result' });
             }
             current = defaultValue;
         }

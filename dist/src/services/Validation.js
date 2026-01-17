@@ -6,17 +6,18 @@ Object.defineProperty(exports, "__esModule", { value: true });
  * ✅ Простая валидация входных данных
  */
 const Constants = require('../constants/Constants');
+const ToolError = require('../errors/ToolError');
 class Validation {
     constructor(logger) {
         this.logger = logger.child('validation');
     }
     ensureString(value, label, { trim = true } = {}) {
         if (typeof value !== 'string') {
-            throw new Error(`${label} must be a non-empty string`);
+            throw ToolError.invalidParams({ field: label, message: `${label} must be a non-empty string` });
         }
         const normalized = value.trim();
         if (normalized.length === 0) {
-            throw new Error(`${label} must be a non-empty string`);
+            throw ToolError.invalidParams({ field: label, message: `${label} must be a non-empty string` });
         }
         return trim ? normalized : value;
     }
@@ -32,14 +33,17 @@ class Validation {
         }
         const numeric = Number(port);
         if (!Number.isInteger(numeric) || numeric < Constants.LIMITS.MIN_PORT || numeric > Constants.LIMITS.MAX_PORT) {
-            throw new Error(`Port must be an integer between ${Constants.LIMITS.MIN_PORT} and ${Constants.LIMITS.MAX_PORT}`);
+            throw ToolError.invalidParams({
+                field: 'port',
+                message: `Port must be an integer between ${Constants.LIMITS.MIN_PORT} and ${Constants.LIMITS.MAX_PORT}`,
+            });
         }
         return numeric;
     }
     ensureIdentifier(name, label) {
         const trimmed = this.ensureString(name, label);
         if (trimmed.includes('\0')) {
-            throw new Error(`${label} must not contain null bytes`);
+            throw ToolError.invalidParams({ field: label, message: `${label} must not contain null bytes` });
         }
         return trimmed;
     }
@@ -51,10 +55,10 @@ class Validation {
     }
     ensureDataObject(data) {
         if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-            throw new Error('Data must be an object');
+            throw ToolError.invalidParams({ field: 'data', message: 'Data must be an object' });
         }
         if (Object.keys(data).length === 0) {
-            throw new Error('Data object must not be empty');
+            throw ToolError.invalidParams({ field: 'data', message: 'Data object must not be empty' });
         }
         return data;
     }
@@ -66,7 +70,7 @@ class Validation {
             return {};
         }
         if (typeof headers !== 'object' || Array.isArray(headers)) {
-            throw new Error('Headers must be an object');
+            throw ToolError.invalidParams({ field: 'headers', message: 'Headers must be an object' });
         }
         return Object.fromEntries(Object.entries(headers)
             .filter(([key]) => typeof key === 'string' && key.trim().length > 0)
@@ -79,7 +83,7 @@ class Validation {
     }
     ensureObject(value, label) {
         if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-            throw new Error(`${label} must be an object`);
+            throw ToolError.invalidParams({ field: label, message: `${label} must be an object` });
         }
         return value;
     }

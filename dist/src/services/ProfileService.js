@@ -8,6 +8,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const fs = require('fs/promises');
 const { resolveProfileBaseDir, resolveProfilesPath } = require('../utils/paths');
 const { atomicWriteTextFile } = require('../utils/fsAtomic');
+const ToolError = require('../errors/ToolError');
 class ProfileService {
     constructor(logger, security) {
         this.logger = logger.child('profiles');
@@ -29,22 +30,22 @@ class ProfileService {
     }
     ensurePlainObject(value, label) {
         if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-            throw new Error(`${label} must be an object`);
+            throw ToolError.invalidParams({ field: label, message: `${label} must be an object` });
         }
         return value;
     }
     validateStoredProfile(name, profile) {
         if (!profile || typeof profile !== 'object') {
-            throw new Error(`Profile '${name}' has invalid format`);
+            throw ToolError.invalidParams({ field: `profiles.${name}`, message: `Profile '${name}' has invalid format` });
         }
         if (typeof profile.type !== 'string' || profile.type.trim().length === 0) {
-            throw new Error(`Profile '${name}' is missing type`);
+            throw ToolError.invalidParams({ field: `profiles.${name}.type`, message: `Profile '${name}' is missing type` });
         }
         if (profile.data && (typeof profile.data !== 'object' || Array.isArray(profile.data))) {
-            throw new Error(`Profile '${name}' has invalid data section`);
+            throw ToolError.invalidParams({ field: `profiles.${name}.data`, message: `Profile '${name}' has invalid data section` });
         }
         if (profile.secrets && (typeof profile.secrets !== 'object' || Array.isArray(profile.secrets))) {
-            throw new Error(`Profile '${name}' has invalid secrets section`);
+            throw ToolError.invalidParams({ field: `profiles.${name}.secrets`, message: `Profile '${name}' has invalid secrets section` });
         }
     }
     async loadProfiles() {
@@ -84,14 +85,14 @@ class ProfileService {
             return null;
         }
         if (typeof value !== 'string') {
-            throw new Error(`${label} must be a string`);
+            throw ToolError.invalidParams({ field: label, message: `${label} must be a string` });
         }
         return this.security.encrypt(value);
     }
     async setProfile(name, config) {
         await this.ensureReady();
         if (typeof name !== 'string' || name.trim().length === 0) {
-            throw new Error('Profile name must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'name', message: 'Profile name must be a non-empty string' });
         }
         this.ensurePlainObject(config, 'Profile config');
         const trimmedName = name.trim();
@@ -104,7 +105,11 @@ class ProfileService {
             updated_at: new Date().toISOString(),
         };
         if (!profile.type) {
-            throw new Error('Profile type must be specified');
+            throw ToolError.invalidParams({
+                field: 'type',
+                message: 'Profile type must be specified',
+                hint: 'Example: { action: \"profile_upsert\", name: \"prod\", type: \"ssh\", data: { host: \"...\" } }',
+            });
         }
         if (incomingData) {
             for (const [key, value] of Object.entries(incomingData)) {
@@ -160,15 +165,25 @@ class ProfileService {
     async getProfile(name, expectedType) {
         await this.ensureReady();
         if (typeof name !== 'string' || name.trim().length === 0) {
-            throw new Error('Profile name must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'name', message: 'Profile name must be a non-empty string' });
         }
         const key = name.trim();
         const entry = this.profiles.get(key);
         if (!entry) {
-            throw new Error(`Profile '${name}' not found`);
+            throw ToolError.notFound({
+                code: 'PROFILE_NOT_FOUND',
+                message: `Profile '${name}' not found`,
+                hint: 'Use action=profile_list to see known profiles.',
+                details: { name: key },
+            });
         }
         if (expectedType && entry.type !== expectedType) {
-            throw new Error(`Profile '${name}' is of type '${entry.type}', expected '${expectedType}'`);
+            throw ToolError.conflict({
+                code: 'PROFILE_TYPE_MISMATCH',
+                message: `Profile '${name}' is of type '${entry.type}', expected '${expectedType}'`,
+                hint: 'Use action=profile_list (optionally filter by type) to locate the correct profile.',
+                details: { name: key, actual_type: entry.type, expected_type: expectedType },
+            });
         }
         const result = {
             name: key,
@@ -203,8 +218,17 @@ class ProfileService {
     }
     async deleteProfile(name) {
         await this.ensureReady();
-        if (!this.profiles.delete(name)) {
-            throw new Error(`Profile '${name}' not found`);
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            throw ToolError.invalidParams({ field: 'name', message: 'Profile name must be a non-empty string' });
+        }
+        const key = name.trim();
+        if (!this.profiles.delete(key)) {
+            throw ToolError.notFound({
+                code: 'PROFILE_NOT_FOUND',
+                message: `Profile '${name}' not found`,
+                hint: 'Use action=profile_list to see known profiles.',
+                details: { name: key },
+            });
         }
         await this.persist();
         this.logger.info('Profile deleted', { name });

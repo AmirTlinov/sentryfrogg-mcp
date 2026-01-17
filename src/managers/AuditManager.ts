@@ -5,6 +5,10 @@
  * 🧾 Audit log manager.
  */
 
+const { unknownActionError } = require('../utils/toolErrors');
+
+const AUDIT_ACTIONS = ['audit_list', 'audit_tail', 'audit_clear', 'audit_stats'];
+
 class AuditManager {
   constructor(logger, auditService) {
     this.logger = logger.child('audit');
@@ -46,7 +50,7 @@ class AuditManager {
       case 'audit_stats':
         return { success: true, stats: this.auditService.getStats() };
       default:
-        throw new Error(`Unknown audit action: ${action}`);
+        throw unknownActionError({ tool: 'audit', action, knownActions: AUDIT_ACTIONS });
     }
   }
 

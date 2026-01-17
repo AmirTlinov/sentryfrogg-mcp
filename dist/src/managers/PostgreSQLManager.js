@@ -14,8 +14,31 @@ const { PassThrough } = require('stream');
 const { Pool } = require('pg');
 const Constants = require('../constants/Constants');
 const { isTruthy } = require('../utils/featureFlags');
+const { unknownActionError } = require('../utils/toolErrors');
+const ToolError = require('../errors/ToolError');
 const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic');
 const { normalizeTableContext, quoteQualifiedIdentifier, buildWhereClause, } = require('../utils/sql');
+const POSTGRES_ACTIONS = [
+    'profile_upsert',
+    'profile_get',
+    'profile_list',
+    'profile_delete',
+    'profile_test',
+    'query',
+    'batch',
+    'transaction',
+    'insert',
+    'insert_bulk',
+    'update',
+    'delete',
+    'select',
+    'count',
+    'exists',
+    'export',
+    'catalog_tables',
+    'catalog_columns',
+    'database_info',
+];
 class PostgreSQLManager {
     constructor(logger, validation, profileService, projectResolver, secretRefResolver) {
         this.logger = logger.child('postgres');
@@ -73,14 +96,18 @@ class PostgreSQLManager {
             case 'database_info':
                 return this.databaseInfo(args);
             default:
-                throw new Error(`Unknown PostgreSQL action: ${action}`);
+                throw unknownActionError({ tool: 'sql', action, knownActions: POSTGRES_ACTIONS });
         }
     }
     parseConnectionUrl(connectionUrl) {
         try {
             const url = new URL(connectionUrl);
             if (!/^postgres(ql)?:$/.test(url.protocol)) {
-                throw new Error('Only postgres:// urls are supported');
+                throw ToolError.invalidParams({
+                    field: 'connection_url',
+                    message: 'Only postgres:// urls are supported',
+                    hint: 'Use postgres:// or postgresql://.',
+                });
             }
             const database = url.pathname ? url.pathname.replace(/^\//, '') : undefined;
             const params = Object.fromEntries(url.searchParams.entries());
@@ -103,7 +130,15 @@ class PostgreSQLManager {
             };
         }
         catch (error) {
-            throw new Error(`Failed to parse connection_url: ${error.message}`);
+            if (ToolError.isToolError(error)) {
+                throw error;
+            }
+            throw ToolError.invalidParams({
+                field: 'connection_url',
+                message: 'Failed to parse connection_url',
+                hint: 'Provide a valid postgres:// URL.',
+                details: { error: error?.message || String(error) },
+            });
         }
     }
     parseSslParams(params, hostFromUrl) {
@@ -291,7 +326,11 @@ class PostgreSQLManager {
                 return this.validation.ensureString(String(postgresProfile), 'Profile name');
             }
             if (context) {
-                throw new Error(`Project target '${context.targetName}' is missing postgres_profile`);
+                throw ToolError.invalidParams({
+                    field: 'profile_name',
+                    message: `Project target '${context.targetName}' is missing postgres_profile`,
+                    hint: 'Configure target.postgres_profile in the project, or pass args.profile_name explicitly.',
+                });
             }
         }
         const profiles = await this.profileService.listProfiles('postgresql');
@@ -301,14 +340,23 @@ class PostgreSQLManager {
         if (profiles.length === 0) {
             return undefined;
         }
-        throw new Error('profile_name is required when multiple profiles exist');
+        throw ToolError.invalidParams({
+            field: 'profile_name',
+            message: 'profile_name is required when multiple profiles exist',
+            hint: 'Pass args.profile_name explicitly.',
+            details: { known_profiles: profiles.map((p) => p.name) },
+        });
     }
     async resolveConnection(args) {
         const hasInlineConnection = args.connection || args.connection_url;
         if (!hasInlineConnection) {
             const profileName = await this.resolveProfileName(args.profile_name, args);
             if (!profileName) {
-                throw new Error('profile_name or connection is required');
+                throw ToolError.invalidParams({
+                    field: 'profile_name',
+                    message: 'profile_name or connection is required',
+                    hint: 'Pass args.profile_name, or provide args.connection / args.connection_url.',
+                });
             }
             const profile = await this.profileService.getProfile(profileName, 'postgresql');
             const connection = this.mergeConnectionProfile(profile);
@@ -465,7 +513,7 @@ class PostgreSQLManager {
         }
         const numeric = Number(value);
         if (!Number.isInteger(numeric) || numeric < 0) {
-            throw new Error(`${label} must be a non-negative integer`);
+            throw ToolError.invalidParams({ field: label, message: `${label} must be a non-negative integer` });
         }
         return numeric;
     }
@@ -478,7 +526,7 @@ class PostgreSQLManager {
         }
         if (Array.isArray(columns)) {
             if (columns.length === 0) {
-                throw new Error('columns must be a non-empty array');
+                throw ToolError.invalidParams({ field: 'columns', message: 'columns must be a non-empty array' });
             }
             return columns.map((col) => quoteQualifiedIdentifier(col)).join(', ');
         }
@@ -487,7 +535,7 @@ class PostgreSQLManager {
             return '*';
         }
         if (!trimmed) {
-            throw new Error('columns must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'columns', message: 'columns must be a non-empty string' });
         }
         return quoteQualifiedIdentifier(trimmed);
     }
@@ -508,17 +556,17 @@ class PostgreSQLManager {
                     direction: entry.direction || entry.dir || 'ASC',
                 };
             }
-            throw new Error('order_by entries must be strings or objects');
+            throw ToolError.invalidParams({ field: 'order_by', message: 'order_by entries must be strings or objects' });
         };
         const entries = Array.isArray(orderBy) ? orderBy : [orderBy];
         const parts = entries.map((entry) => {
             const normalized = normalizeEntry(entry);
             if (!normalized.column) {
-                throw new Error('order_by entry missing column');
+                throw ToolError.invalidParams({ field: 'order_by', message: 'order_by entry missing column' });
             }
             const direction = String(normalized.direction || 'ASC').toUpperCase();
             if (!['ASC', 'DESC'].includes(direction)) {
-                throw new Error('order_by direction must be ASC or DESC');
+                throw ToolError.invalidParams({ field: 'order_by', message: 'order_by direction must be ASC or DESC' });
             }
             return `${quoteQualifiedIdentifier(normalized.column)} ${direction}`;
         });
@@ -560,7 +608,11 @@ class PostgreSQLManager {
     async batch(args) {
         const statements = Array.isArray(args.statements) ? args.statements : [];
         if (statements.length === 0) {
-            throw new Error('statements must be a non-empty array');
+            throw ToolError.invalidParams({
+                field: 'statements',
+                message: 'statements must be a non-empty array',
+                hint: 'Provide at least one statement: [{ sql: \"SELECT 1\" }].',
+            });
         }
         const { connection, poolOptions, profileName } = await this.resolveConnection(args);
         const pool = await this.getPool(connection, poolOptions, profileName);
@@ -622,19 +674,27 @@ class PostgreSQLManager {
         const context = normalizeTableContext(args.table, args.schema);
         const rows = args.rows || args.data;
         if (!Array.isArray(rows) || rows.length === 0) {
-            throw new Error('rows must be a non-empty array');
+            throw ToolError.invalidParams({
+                field: 'rows',
+                message: 'rows must be a non-empty array',
+                hint: 'Provide args.rows as an array of objects (or arrays) to insert.',
+            });
         }
         const returning = args.returning;
         let columns = Array.isArray(args.columns) ? args.columns : null;
         if (!columns) {
             const first = rows[0];
             if (!first || typeof first !== 'object' || Array.isArray(first)) {
-                throw new Error('rows must be objects or provide columns');
+                throw ToolError.invalidParams({
+                    field: 'rows',
+                    message: 'rows must be objects or provide columns',
+                    hint: 'Provide args.columns explicitly when rows are arrays.',
+                });
             }
             columns = Object.keys(first);
         }
         if (!Array.isArray(columns) || columns.length === 0) {
-            throw new Error('columns must be a non-empty array');
+            throw ToolError.invalidParams({ field: 'columns', message: 'columns must be a non-empty array' });
         }
         const columnSql = columns.map((col) => quoteQualifiedIdentifier(col));
         const returnSql = Array.isArray(returning)
@@ -664,7 +724,7 @@ class PostgreSQLManager {
                     });
                 }
                 if (!payload || typeof payload !== 'object') {
-                    throw new Error('Each row must be an object or array');
+                    throw ToolError.invalidParams({ field: 'rows', message: 'Each row must be an object or array' });
                 }
                 const rowValues = columns.map((col) => payload[col]);
                 rowValues.forEach((value) => values.push(value));
@@ -781,7 +841,7 @@ class PostgreSQLManager {
     async exportToStream(args, stream) {
         const format = String(args.format || 'csv').toLowerCase();
         if (!['csv', 'jsonl'].includes(format)) {
-            throw new Error('format must be csv or jsonl');
+            throw ToolError.invalidParams({ field: 'format', message: 'format must be csv or jsonl' });
         }
         const batchSize = this.normalizeLimit(args.batch_size ?? 1000, 'batch_size') ?? 1000;
         const baseOffset = this.normalizeLimit(args.offset ?? 0, 'offset') ?? 0;
@@ -879,11 +939,16 @@ class PostgreSQLManager {
     async exportData(args) {
         const filePath = args.file_path;
         if (!filePath) {
-            throw new Error('file_path is required');
+            throw ToolError.invalidParams({ field: 'file_path', message: 'file_path is required' });
         }
         const overwrite = args.overwrite === true;
         if (!overwrite && await pathExists(filePath)) {
-            throw new Error(`Local path already exists: ${filePath}`);
+            throw ToolError.conflict({
+                code: 'LOCAL_PATH_EXISTS',
+                message: `Local path already exists: ${filePath}`,
+                hint: 'Set overwrite=true to replace it.',
+                details: { path: filePath },
+            });
         }
         await ensureDirForFile(filePath);
         const tmpPath = tempSiblingPath(filePath, '.part');

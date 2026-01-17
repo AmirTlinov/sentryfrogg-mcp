@@ -5,6 +5,10 @@
  * 🧠 State manager.
  */
 
+const { unknownActionError } = require('../utils/toolErrors');
+
+const STATE_ACTIONS = ['set', 'get', 'list', 'unset', 'clear', 'dump'];
+
 class StateManager {
   constructor(logger, stateService) {
     this.logger = logger.child('state');
@@ -32,7 +36,7 @@ class StateManager {
       case 'dump':
         return this.stateService.dump(args.scope);
       default:
-        throw new Error(`Unknown state action: ${action}`);
+        throw unknownActionError({ tool: 'state', action, knownActions: STATE_ACTIONS });
     }
   }
 

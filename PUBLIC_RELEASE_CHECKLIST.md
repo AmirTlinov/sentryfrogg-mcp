@@ -5,6 +5,15 @@
 
 This project can create local state files (`profiles.json`, `.mcp_profiles.key`) that must never be committed.
 
+## Release log
+
+### 7.0.1 (2026-01-17)
+- [x] `npm run check` — OK
+- [x] `npm test` — OK (`213 pass / 0 fail`)
+- [x] `git ls-files .mcp_profiles.key profiles.json` — empty (not tracked)
+- [x] `git log --oneline -- .mcp_profiles.key profiles.json` — empty (no history)
+- [x] Optional filename scan — hits only `SecretRef*` source/tests (expected, no secrets)
+
 ## 1) Quick sanity
 
 - Run `npm run check` and `npm test`.

@@ -23,8 +23,21 @@ const {
   writeBinaryArtifact,
 } = require('../utils/artifacts');
 const { resolveSandboxPath } = require('../utils/sandbox');
+const ToolError = require('../errors/ToolError');
+const { unknownActionError } = require('../utils/toolErrors');
 
 const DEFAULT_ALLOWED_COMMANDS = ['git'];
+const REPO_ACTIONS = [
+  'exec',
+  'repo_info',
+  'assert_clean',
+  'git_diff',
+  'render',
+  'apply_patch',
+  'git_commit',
+  'git_revert',
+  'git_push',
+];
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'status',
   'diff',
@@ -368,7 +381,7 @@ class RepoManager {
         return this.gitPush(args);
       default:
         this.stats.errors += 1;
-        throw new Error(`Unknown repo action: ${action}`);
+        throw unknownActionError({ tool: 'repo', action, knownActions: REPO_ACTIONS });
     }
   }
 
@@ -386,13 +399,24 @@ class RepoManager {
     });
 
     if (status.exit_code !== 0) {
-      throw new Error(status.stderr_buffer.toString('utf8').trim() || 'git status failed');
+      const stderr = status.stderr_buffer.toString('utf8').trim();
+      throw ToolError.internal({
+        code: 'GIT_STATUS_FAILED',
+        message: 'git status failed',
+        hint: 'Ensure repo_root points to a valid git repository and try again.',
+        details: { stderr: stderr || undefined },
+      });
     }
 
     const output = status.stdout_buffer.toString('utf8').trimEnd();
     if (output.trim().length > 0) {
       const preview = output.split(/\r?\n/).slice(0, 20).join('\n');
-      throw new Error(`Repository is dirty (uncommitted changes). Refusing to continue.\n\n${preview}`);
+      throw ToolError.conflict({
+        code: 'REPO_DIRTY',
+        message: 'Repository is dirty (uncommitted changes). Refusing to continue.',
+        hint: 'Commit/stash/clean your working tree, then retry.',
+        details: { preview },
+      });
     }
 
     return { success: true, repo_root: gitRoot, clean: true };
@@ -437,14 +461,19 @@ class RepoManager {
   normalizeCommand(rawCommand, allowedCommands) {
     const command = this.security.cleanCommand(rawCommand);
     if (command.includes(' ') || command.includes('\t') || command.includes('\n')) {
-      throw new Error('command must be a single executable (no whitespace)');
+      throw ToolError.invalidParams({ field: 'command', message: 'command must be a single executable (no whitespace)' });
     }
     if (command.includes('/') || command.includes('\\')) {
-      throw new Error('command must not contain path separators');
+      throw ToolError.invalidParams({ field: 'command', message: 'command must not contain path separators' });
     }
 
     if (!allowsAllCommands(allowedCommands) && !allowedCommands.includes(command)) {
-      throw new Error(`Command not allowed: ${command}`);
+      throw ToolError.denied({
+        code: 'REPO_COMMAND_NOT_ALLOWED',
+        message: `Command not allowed: ${command}`,
+        hint: `Allowed commands: ${allowsAllCommands(allowedCommands) ? '*' : allowedCommands.join(', ')}`,
+        details: { command, allowed_commands: allowedCommands },
+      });
     }
 
     return command;
@@ -455,7 +484,7 @@ class RepoManager {
       return [];
     }
     if (!Array.isArray(argv)) {
-      throw new Error('args must be an array of strings');
+      throw ToolError.invalidParams({ field: 'args', message: 'args must be an array of strings' });
     }
     return argv.map((item) => String(item));
   }
@@ -465,7 +494,7 @@ class RepoManager {
       return undefined;
     }
     if (typeof env !== 'object' || Array.isArray(env)) {
-      throw new Error('env must be an object');
+      throw ToolError.invalidParams({ field: 'env', message: 'env must be an object' });
     }
 
     const blocked = new Set(['PATH', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'NODE_OPTIONS']);
@@ -499,7 +528,11 @@ class RepoManager {
       }
     }
 
-    throw new Error('repo_root is required (or resolve it via project target cwd)');
+    throw ToolError.invalidParams({
+      field: 'repo_root',
+      message: 'repo_root is required (or resolve it via project target cwd)',
+      hint: 'Provide args.repo_root, or set project target.cwd and pass args.project/target.',
+    });
   }
 
   async runGit({ cwd, argv, stdin, timeoutMs, maxCaptureBytes }) {
@@ -599,17 +632,29 @@ class RepoManager {
 
     if (result.exit_code !== 0) {
       const stderr = result.stderr_buffer.toString('utf8').trim();
-      throw new Error(stderr || 'Not a git repository');
+      throw ToolError.invalidParams({
+        field: 'repo_root',
+        message: stderr || 'Not a git repository',
+        hint: 'Point repo_root at a git working tree root and retry.',
+      });
     }
 
     const top = result.stdout_buffer.toString('utf8').trim();
     if (!top) {
-      throw new Error('Unable to resolve git root');
+      throw ToolError.internal({
+        code: 'GIT_ROOT_RESOLUTION_FAILED',
+        message: 'Unable to resolve git root',
+      });
     }
 
     const resolved = await resolveSandboxPath(repoRoot, top);
     if (resolved !== repoRoot) {
-      throw new Error('repo_root must be the git toplevel directory');
+      throw ToolError.invalidParams({
+        field: 'repo_root',
+        message: 'repo_root must be the git toplevel directory',
+        hint: `Use repo_root=${resolved}`,
+        details: { expected_repo_root: resolved, received_repo_root: repoRoot },
+      });
     }
 
     return resolved;
@@ -670,14 +715,19 @@ class RepoManager {
 
     if (stat.isFile()) {
       if (stat.size > maxBytes) {
-        throw new Error(`Plain render output exceeds max_bytes (${stat.size} > ${maxBytes})`);
+        throw ToolError.invalidParams({
+          field: 'max_bytes',
+          message: `Plain render output exceeds max_bytes (${stat.size} > ${maxBytes})`,
+          hint: 'Increase SENTRYFROGG_REPO_RENDER_MAX_BYTES / SF_REPO_RENDER_MAX_BYTES, or reduce the overlay size.',
+          details: { bytes: stat.size, max_bytes: maxBytes },
+        });
       }
       const buffer = await fs.readFile(overlayAbs);
       return { buffer, sources: [path.relative(repoRoot, overlayAbs)] };
     }
 
     if (!stat.isDirectory()) {
-      throw new Error('overlay must be a file or directory');
+      throw ToolError.invalidParams({ field: 'overlay', message: 'overlay must be a file or directory' });
     }
 
     const entries = await fs.readdir(overlayAbs, { withFileTypes: true });
@@ -687,7 +737,12 @@ class RepoManager {
       .sort((a, b) => a.localeCompare(b));
 
     if (yamlFiles.length === 0) {
-      throw new Error('overlay directory contains no .yaml/.yml files');
+      throw ToolError.notFound({
+        code: 'OVERLAY_NO_YAML_FILES',
+        message: 'overlay directory contains no .yaml/.yml files',
+        hint: 'Point overlay to a YAML file or a directory containing Kubernetes YAMLs.',
+        details: { overlay: path.relative(repoRoot, overlayAbs) },
+      });
     }
 
     const sep = Buffer.from('\n---\n', 'utf8');
@@ -703,7 +758,12 @@ class RepoManager {
         total += sep.length;
       }
       if (total > maxBytes) {
-        throw new Error(`Plain render output exceeds max_bytes (${total} > ${maxBytes})`);
+        throw ToolError.invalidParams({
+          field: 'max_bytes',
+          message: `Plain render output exceeds max_bytes (${total} > ${maxBytes})`,
+          hint: 'Increase SENTRYFROGG_REPO_RENDER_MAX_BYTES / SF_REPO_RENDER_MAX_BYTES, or reduce the overlay size.',
+          details: { bytes: total, max_bytes: maxBytes },
+        });
       }
       buffers.push(await fs.readFile(filePath));
       sources.push(path.relative(repoRoot, filePath));
@@ -824,7 +884,11 @@ class RepoManager {
 
     if (renderType === 'plain') {
       if (!overlay) {
-        throw new Error('overlay is required for render_type=plain');
+        throw ToolError.invalidParams({
+          field: 'overlay',
+          message: 'overlay is required for render_type=plain',
+          hint: 'Provide args.overlay (file/dir), or omit render_type to auto-detect from overlay/chart.',
+        });
       }
       const overlayAbs = await resolveSandboxPath(gitRoot, overlay, { mustExist: true });
       const plain = await this.renderPlain({ repoRoot: gitRoot, overlayAbs, maxBytes });
@@ -832,7 +896,11 @@ class RepoManager {
       sources = plain.sources;
     } else if (renderType === 'kustomize') {
       if (!overlay) {
-        throw new Error('overlay is required for render_type=kustomize');
+        throw ToolError.invalidParams({
+          field: 'overlay',
+          message: 'overlay is required for render_type=kustomize',
+          hint: 'Provide args.overlay pointing to a kustomization directory.',
+        });
       }
 
       const allowedCommands = this.resolveAllowedCommands();
@@ -854,11 +922,31 @@ class RepoManager {
       });
 
       if (result.exit_code !== 0 || result.timed_out) {
-        const message = result.stderr_buffer.toString('utf8').trim() || 'kubectl kustomize failed';
-        throw new Error(message);
+        const stderrRef = result.stderr_buffer.length
+          ? await this.writeArtifact('render.stderr.log', result.stderr_buffer, { traceId, spanId, truncated: result.stderr_truncated })
+          : null;
+        if (result.timed_out) {
+          throw ToolError.timeout({
+            code: 'RENDER_TIMEOUT',
+            message: 'kubectl kustomize timed out',
+            hint: `Increase SENTRYFROGG_REPO_RENDER_TIMEOUT_MS / SF_REPO_RENDER_TIMEOUT_MS. ${stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : ''}`.trim(),
+            details: { tool: 'kubectl', subcommand: 'kustomize', stderr_ref: stderrRef || undefined },
+          });
+        }
+        throw ToolError.internal({
+          code: 'RENDER_COMMAND_FAILED',
+          message: 'kubectl kustomize failed',
+          hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+          details: { tool: 'kubectl', subcommand: 'kustomize', exit_code: result.exit_code, stderr_ref: stderrRef || undefined },
+        });
       }
       if (result.stdout_truncated) {
-        throw new Error(`kubectl kustomize output exceeded max_bytes (${maxBytes})`);
+        throw ToolError.invalidParams({
+          field: 'max_bytes',
+          message: `kubectl kustomize output exceeded max_bytes (${maxBytes})`,
+          hint: 'Increase SENTRYFROGG_REPO_RENDER_MAX_BYTES / SF_REPO_RENDER_MAX_BYTES, or reduce the output size.',
+          details: { max_bytes: maxBytes },
+        });
       }
 
       rendered = result.stdout_buffer;
@@ -867,7 +955,11 @@ class RepoManager {
       sources = [overlay];
     } else if (renderType === 'helm') {
       if (!chart) {
-        throw new Error('chart is required for render_type=helm');
+        throw ToolError.invalidParams({
+          field: 'chart',
+          message: 'chart is required for render_type=helm',
+          hint: 'Provide args.chart pointing to a Helm chart directory.',
+        });
       }
 
       const allowedCommands = this.resolveAllowedCommands();
@@ -897,11 +989,31 @@ class RepoManager {
       });
 
       if (result.exit_code !== 0 || result.timed_out) {
-        const message = result.stderr_buffer.toString('utf8').trim() || 'helm template failed';
-        throw new Error(message);
+        const stderrRef = result.stderr_buffer.length
+          ? await this.writeArtifact('render.stderr.log', result.stderr_buffer, { traceId, spanId, truncated: result.stderr_truncated })
+          : null;
+        if (result.timed_out) {
+          throw ToolError.timeout({
+            code: 'RENDER_TIMEOUT',
+            message: 'helm template timed out',
+            hint: `Increase SENTRYFROGG_REPO_RENDER_TIMEOUT_MS / SF_REPO_RENDER_TIMEOUT_MS. ${stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : ''}`.trim(),
+            details: { tool: 'helm', subcommand: 'template', stderr_ref: stderrRef || undefined },
+          });
+        }
+        throw ToolError.internal({
+          code: 'RENDER_COMMAND_FAILED',
+          message: 'helm template failed',
+          hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+          details: { tool: 'helm', subcommand: 'template', exit_code: result.exit_code, stderr_ref: stderrRef || undefined },
+        });
       }
       if (result.stdout_truncated) {
-        throw new Error(`helm template output exceeded max_bytes (${maxBytes})`);
+        throw ToolError.invalidParams({
+          field: 'max_bytes',
+          message: `helm template output exceeded max_bytes (${maxBytes})`,
+          hint: 'Increase SENTRYFROGG_REPO_RENDER_MAX_BYTES / SF_REPO_RENDER_MAX_BYTES, or reduce the output size.',
+          details: { max_bytes: maxBytes },
+        });
       }
 
       rendered = result.stdout_buffer;
@@ -909,11 +1021,19 @@ class RepoManager {
       stderrTruncated = result.stderr_truncated;
       sources = [chart, ...values];
     } else {
-      throw new Error(`Unsupported render_type: ${renderType}`);
+      throw ToolError.invalidParams({
+        field: 'render_type',
+        message: `Unsupported render_type: ${renderType}`,
+        hint: 'Supported: plain, kustomize, helm (or omit render_type to auto-detect).',
+      });
     }
 
     if (!rendered || !rendered.length) {
-      throw new Error('Render produced empty output');
+      throw ToolError.internal({
+        code: 'RENDER_EMPTY_OUTPUT',
+        message: 'Render produced empty output',
+        hint: 'Verify the overlay/chart inputs; the renderer returned zero bytes.',
+      });
     }
 
     const extractedImages = extractK8sImages(rendered.toString('utf8'));
@@ -1054,13 +1174,23 @@ class RepoManager {
       }
 
       if (rel.includes('\0')) {
-        throw new Error('Patch contains null bytes in path');
+        throw ToolError.invalidParams({ field: 'patch', message: 'Patch contains null bytes in path' });
       }
       if (rel.startsWith('/') || rel.includes('\\')) {
-        throw new Error(`Patch path is not allowed: ${rel}`);
+        throw ToolError.denied({
+          code: 'PATCH_PATH_NOT_ALLOWED',
+          message: `Patch path is not allowed: ${rel}`,
+          hint: 'Paths must be repo-relative and use forward slashes.',
+          details: { path: rel },
+        });
       }
       if (rel.split('/').includes('..')) {
-        throw new Error(`Patch path escapes repo_root: ${rel}`);
+        throw ToolError.denied({
+          code: 'PATCH_PATH_ESCAPES_REPO_ROOT',
+          message: `Patch path escapes repo_root: ${rel}`,
+          hint: 'Paths must stay within repo_root.',
+          details: { path: rel },
+        });
       }
 
       await resolveSandboxPath(repoRoot, rel, { mustExist: false });
@@ -1147,10 +1277,21 @@ class RepoManager {
     const repoRoot = await resolveSandboxPath(repoRootRaw, null);
     const gitRoot = await this.resolveGitRoot(repoRoot);
 
+    const traceId = args.trace_id || 'run';
+    const spanId = args.span_id;
+
     const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
     const diff = await this.runGit({ cwd: gitRoot, argv: ['diff'], timeoutMs, maxCaptureBytes });
     if (diff.exit_code !== 0) {
-      throw new Error(diff.stderr_buffer.toString('utf8').trim() || 'git diff failed');
+      const stderrRef = diff.stderr_buffer.length
+        ? await this.writeArtifact('diff.stderr.log', diff.stderr_buffer, { traceId, spanId, truncated: diff.stderr_truncated })
+        : null;
+      throw ToolError.internal({
+        code: 'GIT_DIFF_FAILED',
+        message: 'git diff failed',
+        hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : 'Ensure repo_root points to a valid git repository.',
+        details: { stderr_ref: stderrRef || undefined },
+      });
     }
 
     const diffSha256 = crypto
@@ -1161,8 +1302,6 @@ class RepoManager {
     const stat = await this.runGit({ cwd: gitRoot, argv: ['diff', '--stat'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
     const diffstat = stat.exit_code === 0 ? stat.stdout_buffer.toString('utf8').trimEnd() : null;
 
-    const traceId = args.trace_id || 'run';
-    const spanId = args.span_id;
     const diffRef = await this.writeArtifact('diff.patch', diff.stdout_buffer, { traceId, spanId, truncated: diff.stdout_truncated });
 
     return {
@@ -1178,7 +1317,11 @@ class RepoManager {
 
   async applyPatch(args) {
     if (args.apply !== true) {
-      throw new Error('apply=true is required for apply_patch');
+      throw ToolError.denied({
+        code: 'APPLY_REQUIRED',
+        message: 'apply=true is required for apply_patch',
+        hint: 'Rerun with apply=true if you intend to modify the repository.',
+      });
     }
 
     const patch = this.validation.ensureString(String(args.patch ?? ''), 'patch', { trim: false });
@@ -1217,12 +1360,30 @@ class RepoManager {
         const { maxCaptureBytes, timeoutMs } = this.resolveExecBudgets();
         const check = await this.runGit({ cwd: gitRoot, argv: ['apply', '--check', tmpPath], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
         if (check.exit_code !== 0) {
-          throw new Error(check.stderr_buffer.toString('utf8').trim() || 'git apply --check failed');
+          const spanId = args.span_id;
+          const stderrRef = check.stderr_buffer.length
+            ? await this.writeArtifact('apply.check.stderr.log', check.stderr_buffer, { traceId, spanId, truncated: check.stderr_truncated })
+            : null;
+          throw ToolError.invalidParams({
+            field: 'patch',
+            message: 'git apply --check failed (patch does not apply cleanly)',
+            hint: stderrRef?.uri
+              ? `See stderr: ${stderrRef.uri}`
+              : 'Ensure the patch is generated against the current repo state.',
+          });
         }
 
         const applied = await this.runGit({ cwd: gitRoot, argv: ['apply', '--whitespace=nowarn', tmpPath], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
         if (applied.exit_code !== 0) {
-          throw new Error(applied.stderr_buffer.toString('utf8').trim() || 'git apply failed');
+          const spanId = args.span_id;
+          const stderrRef = applied.stderr_buffer.length
+            ? await this.writeArtifact('apply.stderr.log', applied.stderr_buffer, { traceId, spanId, truncated: applied.stderr_truncated })
+            : null;
+          throw ToolError.internal({
+            code: 'GIT_APPLY_FAILED',
+            message: 'git apply failed',
+            hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+          });
         }
 
         const stat = await this.runGit({ cwd: gitRoot, argv: ['diff', '--stat'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
@@ -1250,7 +1411,11 @@ class RepoManager {
 
   async gitCommit(args) {
     if (args.apply !== true) {
-      throw new Error('apply=true is required for git_commit');
+      throw ToolError.denied({
+        code: 'APPLY_REQUIRED',
+        message: 'apply=true is required for git_commit',
+        hint: 'Rerun with apply=true if you intend to modify the repository.',
+      });
     }
 
     const message = this.validation.ensureString(String(args.message ?? ''), 'message', { trim: false });
@@ -1280,7 +1445,15 @@ class RepoManager {
 
       const add = await this.runGit({ cwd: gitRoot, argv: ['add', '-A'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
       if (add.exit_code !== 0) {
-        throw new Error(add.stderr_buffer.toString('utf8').trim() || 'git add failed');
+        const spanId = args.span_id;
+        const stderrRef = add.stderr_buffer.length
+          ? await this.writeArtifact('commit.add.stderr.log', add.stderr_buffer, { traceId, spanId, truncated: add.stderr_truncated })
+          : null;
+        throw ToolError.internal({
+          code: 'GIT_ADD_FAILED',
+          message: 'git add failed',
+          hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+        });
       }
 
       const staged = await this.runGit({ cwd: gitRoot, argv: ['diff', '--cached', '--name-only'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
@@ -1288,7 +1461,11 @@ class RepoManager {
         ? staged.stdout_buffer.toString('utf8').trim().split(/\r?\n/).filter(Boolean)
         : [];
       if (stagedList.length === 0) {
-        throw new Error('No staged changes to commit');
+        throw ToolError.conflict({
+          code: 'NO_STAGED_CHANGES',
+          message: 'No staged changes to commit',
+          hint: 'Ensure the repository has changes, or skip git_commit.',
+        });
       }
 
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sf-git-commit-'));
@@ -1304,12 +1481,28 @@ class RepoManager {
         });
 
         if (commit.exit_code !== 0) {
-          throw new Error(commit.stderr_buffer.toString('utf8').trim() || 'git commit failed');
+          const spanId = args.span_id;
+          const stderrRef = commit.stderr_buffer.length
+            ? await this.writeArtifact('commit.stderr.log', commit.stderr_buffer, { traceId, spanId, truncated: commit.stderr_truncated })
+            : null;
+          throw ToolError.internal({
+            code: 'GIT_COMMIT_FAILED',
+            message: 'git commit failed',
+            hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+          });
         }
 
         const head = await this.runGit({ cwd: gitRoot, argv: ['rev-parse', 'HEAD'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
         if (head.exit_code !== 0) {
-          throw new Error(head.stderr_buffer.toString('utf8').trim() || 'git rev-parse HEAD failed');
+          const spanId = args.span_id;
+          const stderrRef = head.stderr_buffer.length
+            ? await this.writeArtifact('commit.head.stderr.log', head.stderr_buffer, { traceId, spanId, truncated: head.stderr_truncated })
+            : null;
+          throw ToolError.internal({
+            code: 'GIT_REV_PARSE_FAILED',
+            message: 'git rev-parse HEAD failed',
+            hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+          });
         }
 
         return {
@@ -1334,7 +1527,11 @@ class RepoManager {
 
   async gitRevert(args) {
     if (args.apply !== true) {
-      throw new Error('apply=true is required for git_revert');
+      throw ToolError.denied({
+        code: 'APPLY_REQUIRED',
+        message: 'apply=true is required for git_revert',
+        hint: 'Rerun with apply=true if you intend to modify the repository.',
+      });
     }
 
     const sha = this.validation.ensureString(String(args.sha ?? ''), 'sha');
@@ -1343,7 +1540,7 @@ class RepoManager {
       : Number(args.mainline);
     if (mainline !== null) {
       if (!Number.isFinite(mainline) || mainline <= 0) {
-        throw new Error('mainline must be a positive integer');
+        throw ToolError.invalidParams({ field: 'mainline', message: 'mainline must be a positive integer' });
       }
     }
 
@@ -1377,7 +1574,18 @@ class RepoManager {
 
       const revert = await this.runGit({ cwd: gitRoot, argv, timeoutMs, maxCaptureBytes });
       if (revert.exit_code !== 0) {
-        throw new Error(revert.stderr_buffer.toString('utf8').trim() || 'git revert failed');
+        const spanId = args.span_id;
+        const revertLog = await this.writeArtifact('revert.log', Buffer.concat([revert.stdout_buffer, revert.stderr_buffer]), {
+          traceId,
+          spanId,
+          truncated: revert.stdout_truncated || revert.stderr_truncated,
+        });
+        throw ToolError.conflict({
+          code: 'GIT_REVERT_FAILED',
+          message: 'git revert failed',
+          hint: revertLog?.uri ? `See revert log: ${revertLog.uri}` : 'Resolve conflicts and retry.',
+          details: { revert_ref: revertLog || undefined },
+        });
       }
 
       const spanId = args.span_id;
@@ -1394,7 +1602,15 @@ class RepoManager {
         maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024),
       });
       if (head.exit_code !== 0) {
-        throw new Error(head.stderr_buffer.toString('utf8').trim() || 'git rev-parse HEAD failed');
+        const spanId = args.span_id;
+        const stderrRef = head.stderr_buffer.length
+          ? await this.writeArtifact('revert.head.stderr.log', head.stderr_buffer, { traceId, spanId, truncated: head.stderr_truncated })
+          : null;
+        throw ToolError.internal({
+          code: 'GIT_REV_PARSE_FAILED',
+          message: 'git rev-parse HEAD failed',
+          hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+        });
       }
 
       return {
@@ -1417,7 +1633,11 @@ class RepoManager {
 
   async gitPush(args) {
     if (args.apply !== true) {
-      throw new Error('apply=true is required for git_push');
+      throw ToolError.denied({
+        code: 'APPLY_REQUIRED',
+        message: 'apply=true is required for git_push',
+        hint: 'Rerun with apply=true if you intend to modify the repository.',
+      });
     }
 
     const repoRootRaw = await this.resolveRepoRoot(args);
@@ -1448,17 +1668,37 @@ class RepoManager {
       if (!branch) {
         const current = await this.runGit({ cwd: gitRoot, argv: ['rev-parse', '--abbrev-ref', 'HEAD'], timeoutMs, maxCaptureBytes: Math.min(maxCaptureBytes, 64 * 1024) });
         if (current.exit_code !== 0) {
-          throw new Error(current.stderr_buffer.toString('utf8').trim() || 'Unable to resolve current branch');
+          const spanId = args.span_id;
+          const stderrRef = current.stderr_buffer.length
+            ? await this.writeArtifact('push.branch.stderr.log', current.stderr_buffer, { traceId, spanId, truncated: current.stderr_truncated })
+            : null;
+          throw ToolError.internal({
+            code: 'GIT_CURRENT_BRANCH_FAILED',
+            message: 'Unable to resolve current branch',
+            hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+          });
         }
         branch = current.stdout_buffer.toString('utf8').trim();
         if (!branch || branch === 'HEAD') {
-          throw new Error('Detached HEAD cannot be pushed without explicit branch');
+          throw ToolError.conflict({
+            code: 'DETACHED_HEAD',
+            message: 'Detached HEAD cannot be pushed without explicit branch',
+            hint: 'Pass args.branch explicitly, or checkout a branch before pushing.',
+          });
         }
       }
 
       const push = await this.runGit({ cwd: gitRoot, argv: ['push', remote, branch], timeoutMs, maxCaptureBytes });
       if (push.exit_code !== 0) {
-        throw new Error(push.stderr_buffer.toString('utf8').trim() || 'git push failed');
+        const spanId = args.span_id;
+        const stderrRef = push.stderr_buffer.length
+          ? await this.writeArtifact('push.stderr.log', push.stderr_buffer, { traceId, spanId, truncated: push.stderr_truncated })
+          : null;
+        throw ToolError.internal({
+          code: 'GIT_PUSH_FAILED',
+          message: 'git push failed',
+          hint: stderrRef?.uri ? `See stderr: ${stderrRef.uri}` : undefined,
+        });
       }
 
       const spanId = args.span_id;
@@ -1492,7 +1732,7 @@ class RepoManager {
     }
 
     if (!argv || argv.length === 0) {
-      throw new Error(`${command} subcommand is required`);
+      throw ToolError.invalidParams({ field: 'args', message: `${command} subcommand is required` });
     }
 
     let subcommand = argv[0];
@@ -1500,22 +1740,29 @@ class RepoManager {
     if (command === 'kubectl') {
       const found = findKubectlToken(argv, 0);
       if (!found) {
-        throw new Error('kubectl subcommand is required');
+        throw ToolError.invalidParams({ field: 'args', message: 'kubectl subcommand is required' });
       }
       subcommand = found.token;
       subcommandIndex = found.index;
     } else {
       if (typeof subcommand !== 'string' || !subcommand.trim()) {
-        throw new Error(`${command} subcommand is required`);
+        throw ToolError.invalidParams({ field: 'args', message: `${command} subcommand is required` });
       }
       if (subcommand.startsWith('-')) {
-        throw new Error(`${command} subcommand must be the first argument when apply=false`);
+        throw ToolError.invalidParams({
+          field: 'args',
+          message: `${command} subcommand must be the first argument when apply=false`,
+        });
       }
     }
 
     if (command === 'git') {
       if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) {
-        throw new Error(`git ${subcommand} requires apply=true`);
+        throw ToolError.denied({
+          code: 'APPLY_REQUIRED',
+          message: `git ${subcommand} requires apply=true`,
+          hint: 'Rerun with apply=true if you intend to run a write operation.',
+        });
       }
       return;
     }
@@ -1528,19 +1775,31 @@ class RepoManager {
       if (nested) {
         const second = findKubectlToken(argv, subcommandIndex + 1);
         if (!second) {
-          throw new Error(`kubectl ${subcommand} subcommand is required`);
+          throw ToolError.invalidParams({ field: 'args', message: `kubectl ${subcommand} subcommand is required` });
         }
         if (!nested.has(second.token)) {
-          throw new Error(`kubectl ${subcommand} ${second.token} requires apply=true`);
+          throw ToolError.denied({
+            code: 'APPLY_REQUIRED',
+            message: `kubectl ${subcommand} ${second.token} requires apply=true`,
+            hint: 'Rerun with apply=true if you intend to run a write operation.',
+          });
         }
         return;
       }
-      throw new Error(`kubectl ${subcommand} requires apply=true`);
+      throw ToolError.denied({
+        code: 'APPLY_REQUIRED',
+        message: `kubectl ${subcommand} requires apply=true`,
+        hint: 'Rerun with apply=true if you intend to run a write operation.',
+      });
     }
 
     const allowed = READ_ONLY_EXEC_SUBCOMMANDS[command];
     if (!allowed || !allowed.has(subcommand)) {
-      throw new Error(`${command} ${subcommand} requires apply=true`);
+      throw ToolError.denied({
+        code: 'APPLY_REQUIRED',
+        message: `${command} ${subcommand} requires apply=true`,
+        hint: 'Rerun with apply=true if you intend to run a write operation.',
+      });
     }
   }
 
@@ -1555,10 +1814,18 @@ class RepoManager {
     if (command === 'git') {
       const first = argv[0];
       if (first === '-c' || first === '--config' || first === '--config-env') {
-        throw new Error('git exec forbids global -c/--config flags');
+        throw ToolError.denied({
+          code: 'GIT_CONFIG_FORBIDDEN',
+          message: 'git exec forbids global -c/--config flags',
+          hint: 'Pass a safe subcommand without global config overrides.',
+        });
       }
       if (typeof first === 'string' && first.startsWith('--config=')) {
-        throw new Error('git exec forbids global --config flags');
+        throw ToolError.denied({
+          code: 'GIT_CONFIG_FORBIDDEN',
+          message: 'git exec forbids global --config flags',
+          hint: 'Pass a safe subcommand without global config overrides.',
+        });
       }
     }
 

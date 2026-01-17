@@ -5,6 +5,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 /**
  * 🧭 Workspace Manager
  */
+const { unknownActionError } = require('../utils/toolErrors');
+const ToolError = require('../errors/ToolError');
+const WORKSPACE_ACTIONS = ['summary', 'suggest', 'diagnose', 'store_status', 'run', 'cleanup', 'stats'];
 class WorkspaceManager {
     constructor(logger, validation, workspaceService, runbookManager, intentManager, sshManager) {
         this.logger = logger.child('workspace');
@@ -32,7 +35,7 @@ class WorkspaceManager {
             case 'stats':
                 return this.workspaceService.getStats();
             default:
-                throw new Error(`Unknown workspace action: ${action}`);
+                throw unknownActionError({ tool: 'workspace', action, knownActions: WORKSPACE_ACTIONS });
         }
     }
     async cleanup() {
@@ -72,11 +75,19 @@ class WorkspaceManager {
     async run(args) {
         if (args.intent || args.intent_type || args.type) {
             if (!this.intentManager) {
-                throw new Error('Intent manager is not available');
+                throw ToolError.internal({
+                    code: 'INTENT_MANAGER_UNAVAILABLE',
+                    message: 'Intent manager is not available',
+                    hint: 'This is a server configuration error. Enable IntentManager in bootstrap.',
+                });
             }
             const type = args.intent?.type || args.intent_type || args.type;
             if (!type) {
-                throw new Error('intent type is required');
+                throw ToolError.invalidParams({
+                    field: 'intent.type',
+                    message: 'intent type is required',
+                    hint: 'Provide args.intent={ type, inputs } or args.intent_type.',
+                });
             }
             const inputs = args.intent?.inputs || args.inputs || args.input || {};
             const intent = { type, inputs };

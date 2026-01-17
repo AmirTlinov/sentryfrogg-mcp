@@ -5,6 +5,10 @@
  * 🧭 Context Manager
  */
 
+const { unknownActionError } = require('../utils/toolErrors');
+
+const CONTEXT_ACTIONS = ['get', 'refresh', 'summary', 'list', 'stats'];
+
 class ContextManager {
   constructor(logger, validation, contextService) {
     this.logger = logger.child('context');
@@ -26,7 +30,7 @@ class ContextManager {
       case 'stats':
         return this.contextService.getStats();
       default:
-        throw new Error(`Unknown context action: ${action}`);
+        throw unknownActionError({ tool: 'context', action, knownActions: CONTEXT_ACTIONS });
     }
   }
 
@@ -64,13 +68,27 @@ class ContextManager {
     const payload = this.normalizeArgs(args);
     const result = await this.contextService.getContext(payload);
     const context = result.context || {};
+    const signals = context.signals && typeof context.signals === 'object' ? context.signals : {};
+    const files = context.files && typeof context.files === 'object' ? context.files : {};
+    const signalsTrue = Object.entries(signals)
+      .filter(([, value]) => value)
+      .map(([key]) => key)
+      .sort();
+    const evidenceFiles = Object.entries(files)
+      .filter(([, value]) => value)
+      .map(([key]) => key)
+      .sort()
+      .slice(0, 80);
     return {
       success: true,
       summary: {
         key: context.key,
         root: context.root,
         tags: context.tags,
-        signals: context.signals,
+        signals,
+        signals_true: signalsTrue,
+        evidence_files: evidenceFiles,
+        git_root: context.git?.root ?? null,
         project_name: context.project_name,
         target_name: context.target_name,
         updated_at: context.updated_at,

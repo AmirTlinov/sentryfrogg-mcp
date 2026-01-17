@@ -10,6 +10,9 @@ const crypto = require('crypto');
 const { matchesWhen } = require('../utils/whenMatcher');
 
 const ToolError = require('../errors/ToolError');
+const { unknownActionError } = require('../utils/toolErrors');
+
+const INTENT_ACTIONS = ['compile', 'dry_run', 'execute', 'explain'];
 
 function getByPath(source, path) {
   if (!path) {
@@ -126,11 +129,7 @@ class IntentManager {
       case 'explain':
         return this.explain(args);
       default:
-        throw ToolError.invalidParams({
-          message: `Unknown intent action: ${action}`,
-          field: 'action',
-          hint: 'Use one of: compile, dry_run, execute, explain.',
-        });
+        throw unknownActionError({ tool: 'intent', action, knownActions: INTENT_ACTIONS });
     }
   }
 

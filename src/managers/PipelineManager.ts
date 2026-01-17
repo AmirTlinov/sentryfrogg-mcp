@@ -12,6 +12,8 @@ const { pipeline } = require('stream/promises');
 const readline = require('readline');
 const { redactObject } = require('../utils/redact');
 const { isTruthy } = require('../utils/featureFlags');
+const { unknownActionError } = require('../utils/toolErrors');
+const ToolError = require('../errors/ToolError');
 const {
   resolveContextRepoRoot,
   buildToolCallFileRef,
@@ -19,6 +21,15 @@ const {
 } = require('../utils/artifacts');
 
 const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
+const PIPELINE_ACTIONS = ['run', 'describe', 'deploy_smoke'];
+const PIPELINE_FLOWS = [
+  'http_to_sftp',
+  'sftp_to_http',
+  'http_to_postgres',
+  'sftp_to_postgres',
+  'postgres_to_sftp',
+  'postgres_to_http',
+];
 
 function readPositiveInt(value) {
   if (value === undefined || value === null || value === '') {
@@ -189,8 +200,10 @@ class PipelineManager {
         return this.runPipeline(args);
       case 'describe':
         return this.describe();
+      case 'deploy_smoke':
+        return this.deploySmoke(args);
       default:
-        throw new Error(`Unknown pipeline action: ${action}`);
+        throw unknownActionError({ tool: 'pipeline', action, knownActions: PIPELINE_ACTIONS });
     }
   }
 
@@ -208,10 +221,99 @@ class PipelineManager {
     };
   }
 
+  async deploySmoke(args = {}) {
+    const startedAt = Date.now();
+    const trace = this.buildTrace(args);
+
+    const localPath = this.validation.ensureString(args.local_path, 'local_path');
+    const remotePath = this.validation.ensureString(args.remote_path, 'remote_path');
+    const url = this.validation.ensureString(args.url, 'url');
+
+    const settleMs = Math.min(readPositiveInt(args.settle_ms) ?? 0, 120000);
+    const maxAttempts = Math.min(readPositiveInt(args.smoke_attempts) ?? 5, 20);
+    const delayMs = Math.min(readPositiveInt(args.smoke_delay_ms) ?? 1000, 60000);
+    const smokeTimeoutMs = Math.min(readPositiveInt(args.smoke_timeout_ms) ?? 10000, 120000);
+
+    await this.auditStage('deploy_smoke.deploy', trace, { local_path: localPath, remote_path: remotePath });
+
+    const deploy = await this.sshManager.deployFile({
+      ...args,
+      action: 'deploy_file',
+      local_path: localPath,
+      remote_path: remotePath,
+      restart: args.restart,
+      restart_command: args.restart_command,
+    });
+
+    if (!deploy || deploy.success !== true) {
+      await this.auditStage('deploy_smoke.failed', trace, { stage: 'deploy' });
+      return {
+        success: false,
+        code: 'DEPLOY_FAILED',
+        deploy,
+        smoke: null,
+        duration_ms: Date.now() - startedAt,
+      };
+    }
+
+    if (settleMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, settleMs));
+    }
+
+    await this.auditStage('deploy_smoke.smoke', trace, { url, attempts: maxAttempts });
+
+    let last = null;
+    let okAt = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      last = await this.apiManager.smokeHttp({
+        ...args,
+        action: 'smoke_http',
+        url,
+        timeout_ms: smokeTimeoutMs,
+      });
+
+      const ok = Boolean(last?.success && last?.ok);
+      if (ok) {
+        okAt = attempt;
+        break;
+      }
+
+      if (attempt < maxAttempts && delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    const smokeOk = Boolean(last?.success && last?.ok);
+    const success = Boolean(deploy?.success && smokeOk);
+    const summary = smokeOk
+      ? 'deploy ok; smoke ok'
+      : 'deploy ok; smoke failed';
+
+    const nextActions = smokeOk
+      ? []
+      : [
+        { tool: 'api', action: 'smoke_http', args: { url, expect_code: args.expect_code ?? 200, follow_redirects: args.follow_redirects !== false, insecure_ok: args.insecure_ok !== false } },
+      ];
+
+    return {
+      success,
+      summary,
+      deploy,
+      smoke: last,
+      attempts: { max_attempts: maxAttempts, ok_at: okAt, delay_ms: delayMs, timeout_ms: smokeTimeoutMs },
+      next_actions: nextActions,
+      duration_ms: Date.now() - startedAt,
+    };
+  }
+
   async runPipeline(args) {
     const flow = String(args.flow || '').toLowerCase();
     if (!flow) {
-      throw new Error('pipeline flow is required');
+      throw ToolError.invalidParams({
+        field: 'flow',
+        message: 'pipeline flow is required',
+        hint: `Use one of: ${PIPELINE_FLOWS.join(', ')}`,
+      });
     }
 
     switch (flow) {
@@ -228,7 +330,11 @@ class PipelineManager {
       case 'postgres_to_http':
         return this.postgresToHttp(args);
       default:
-        throw new Error(`Unknown pipeline flow: ${flow}`);
+        throw ToolError.invalidParams({
+          field: 'flow',
+          message: `Unknown pipeline flow: ${flow}`,
+          hint: `Use one of: ${PIPELINE_FLOWS.join(', ')}`,
+        });
     }
   }
 
@@ -447,7 +553,7 @@ class PipelineManager {
 
   async openHttpStream(httpArgs, cacheArgs, trace) {
     if (!httpArgs || typeof httpArgs !== 'object') {
-      throw new Error('http config is required');
+      throw ToolError.invalidParams({ field: 'http', message: 'http config is required' });
     }
 
     const { profile, auth } = await this.resolveHttpProfile(httpArgs);
@@ -486,7 +592,37 @@ class PipelineManager {
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new Error(`HTTP source failed (${response.status}): ${text}`);
+      const redacted = redactObject(String(text || ''), { maxString: 16 * 1024 });
+      if (response.status === 401 || response.status === 403) {
+        throw ToolError.denied({
+          code: 'HTTP_DENIED',
+          message: `HTTP source failed (${response.status})`,
+          hint: 'Check auth / auth_provider configuration for the API profile.',
+          details: { status: response.status, body: redacted },
+        });
+      }
+      if (response.status === 404) {
+        throw ToolError.notFound({
+          code: 'HTTP_NOT_FOUND',
+          message: `HTTP source failed (${response.status})`,
+          hint: 'Verify the URL/path is correct.',
+          details: { status: response.status, body: redacted },
+        });
+      }
+      if (response.status === 429 || response.status >= 500) {
+        throw ToolError.retryable({
+          code: 'HTTP_RETRYABLE',
+          message: `HTTP source failed (${response.status})`,
+          hint: 'Retry later or increase timeout/retries.',
+          details: { status: response.status, body: redacted },
+        });
+      }
+      throw ToolError.invalidParams({
+        field: 'http',
+        message: `HTTP source failed (${response.status})`,
+        hint: 'Check request parameters (headers/query/body) and retry.',
+        details: { status: response.status, body: redacted },
+      });
     }
 
     const stream = this.normalizeStream(response);
@@ -678,8 +814,16 @@ class PipelineManager {
       }
     }
 
-    await this.auditStage('http_upload', trace, { url: baseConfig.url, status: lastStatus }, lastError || new Error('Upload failed'));
-    throw lastError || new Error('Upload failed after retries');
+    const failure = lastError;
+    const error = ToolError.isToolError(failure)
+      ? failure
+      : ToolError.retryable({
+        code: 'HTTP_UPLOAD_FAILED',
+        message: 'Upload failed after retries',
+        hint: failure?.message ? `Last error: ${failure.message}` : undefined,
+      });
+    await this.auditStage('http_upload', trace, { url: baseConfig.url, status: lastStatus }, error);
+    throw error;
   }
 
   parseCsvLine(line, delimiter) {
@@ -715,7 +859,7 @@ class PipelineManager {
   async ingestStream(stream, config) {
     const format = String(config.format || 'jsonl').toLowerCase();
     if (!['jsonl', 'csv'].includes(format)) {
-      throw new Error('format must be jsonl or csv');
+      throw ToolError.invalidParams({ field: 'format', message: 'format must be jsonl or csv' });
     }
 
     const batchSize = Number(config.batch_size || 500);
@@ -746,7 +890,7 @@ class PipelineManager {
       if (format === 'jsonl') {
         const parsed = JSON.parse(trimmed);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          throw new Error('jsonl line must be an object');
+          throw ToolError.invalidParams({ field: 'format', message: 'jsonl line must be an object' });
         }
         rows.push(parsed);
       } else {
@@ -756,7 +900,7 @@ class PipelineManager {
           continue;
         }
         if (!columns) {
-          throw new Error('csv columns are required');
+          throw ToolError.invalidParams({ field: 'columns', message: 'csv columns are required' });
         }
         const row = {};
         columns.forEach((col, index) => {

@@ -6,21 +6,52 @@
  */
 
 const crypto = require('crypto');
+const fsSync = require('node:fs');
 const fs = require('fs/promises');
 const path = require('path');
 const { Client } = require('ssh2');
 const Constants = require('../constants/Constants');
 const { isTruthy } = require('../utils/featureFlags');
 const { expandHomePath } = require('../utils/userPaths');
+const { redactText } = require('../utils/redact');
+const ToolError = require('../errors/ToolError');
+const { unknownActionError } = require('../utils/toolErrors');
 const {
   resolveContextRepoRoot,
   buildToolCallFileRef,
   createArtifactWriteStream,
+  writeTextArtifact,
   writeBinaryArtifact,
 } = require('../utils/artifacts');
 
 const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
 const DEFAULT_MAX_INLINE_BYTES = 16 * 1024;
+const SSH_ACTIONS = [
+  'profile_upsert',
+  'profile_get',
+  'profile_list',
+  'profile_delete',
+  'connect',
+  'authorized_keys_add',
+  'exec',
+  'exec_detached',
+  'exec_follow',
+  'deploy_file',
+  'job_status',
+  'job_wait',
+  'job_logs_tail',
+  'tail_job',
+  'follow_job',
+  'job_kill',
+  'job_forget',
+  'batch',
+  'system_info',
+  'check_host',
+  'sftp_list',
+  'sftp_exists',
+  'sftp_upload',
+  'sftp_download',
+];
 
 function profileKey(profileName) {
   return profileName;
@@ -43,7 +74,11 @@ function normalizeHostKeyPolicy(value) {
   if (normalized === 'pin') {
     return 'pin';
   }
-  throw new Error(`Unknown host_key_policy: ${normalized}`);
+  throw ToolError.invalidParams({
+    field: 'host_key_policy',
+    message: `Unknown host_key_policy: ${normalized}`,
+    hint: 'Use one of: accept, tofu, pin.',
+  });
 }
 
 function normalizeFingerprintSha256(value) {
@@ -63,7 +98,7 @@ function normalizeFingerprintSha256(value) {
 
 function fingerprintHostKeySha256(key) {
   if (!Buffer.isBuffer(key)) {
-    throw new Error('SSH host key is not a Buffer');
+    throw ToolError.internal({ code: 'SSH_HOST_KEY_INVALID', message: 'SSH host key is not a Buffer' });
   }
   const hash = crypto.createHash('sha256').update(key).digest('base64');
   return `SHA256:${hash.replace(/=+$/g, '')}`;
@@ -114,6 +149,27 @@ function isStreamToArtifactEnabled() {
   return Boolean(resolveStreamToArtifactMode());
 }
 
+function collectSecretValues(map) {
+  if (!map || typeof map !== 'object' || Array.isArray(map)) {
+    return null;
+  }
+  const out = [];
+  for (const raw of Object.values(map)) {
+    if (typeof raw !== 'string') {
+      continue;
+    }
+    const trimmed = raw.trim();
+    if (trimmed.length < 6) {
+      continue;
+    }
+    out.push(trimmed);
+    if (out.length >= 32) {
+      break;
+    }
+  }
+  return out.length ? out : null;
+}
+
 function normalizePublicKeyLine(raw) {
   const normalized = String(raw ?? '').replace(/\r/g, '');
   const lines = normalized
@@ -122,21 +178,33 @@ function normalizePublicKeyLine(raw) {
     .filter((line) => line.length > 0 && !line.startsWith('#'));
 
   if (lines.length === 0) {
-    throw new Error('public_key must contain a single key line');
+    throw ToolError.invalidParams({
+      field: 'public_key',
+      message: 'public_key must contain a single key line',
+      hint: 'Expected a single line: "<type> <base64> [comment]".',
+    });
   }
 
   if (lines.length > 1) {
-    throw new Error('public_key must be a single key line');
+    throw ToolError.invalidParams({
+      field: 'public_key',
+      message: 'public_key must be a single key line',
+      hint: 'Remove extra lines/comments; keep exactly one key line.',
+    });
   }
 
   const line = lines[0];
   if (line.includes('\0')) {
-    throw new Error('public_key must not contain null bytes');
+    throw ToolError.invalidParams({ field: 'public_key', message: 'public_key must not contain null bytes' });
   }
 
   const tokens = line.split(/\s+/);
   if (tokens.length < 2) {
-    throw new Error('public_key has invalid format (expected: "<type> <base64> [comment]")');
+    throw ToolError.invalidParams({
+      field: 'public_key',
+      message: 'public_key has invalid format',
+      hint: 'Expected: "<type> <base64> [comment]".',
+    });
   }
 
   return line;
@@ -145,7 +213,11 @@ function normalizePublicKeyLine(raw) {
 function parsePublicKeyTokens(line) {
   const tokens = String(line || '').trim().split(/\s+/);
   if (tokens.length < 2) {
-    throw new Error('public_key has invalid format (expected: "<type> <base64> [comment]")');
+    throw ToolError.invalidParams({
+      field: 'public_key',
+      message: 'public_key has invalid format',
+      hint: 'Expected: "<type> <base64> [comment]".',
+    });
   }
   return { keyType: tokens[0], keyBlob: tokens[1] };
 }
@@ -204,12 +276,20 @@ class SSHManager {
         return this.execCommand(args);
       case 'exec_detached':
         return this.execDetached(args);
+      case 'exec_follow':
+        return this.execFollow(args);
+      case 'deploy_file':
+        return this.deployFile(args);
       case 'job_status':
         return this.jobStatus(args);
       case 'job_wait':
         return this.jobWait(args);
       case 'job_logs_tail':
         return this.jobLogsTail(args);
+      case 'tail_job':
+        return this.tailJob(args);
+      case 'follow_job':
+        return this.followJob(args);
       case 'job_kill':
         return this.jobKill(args);
       case 'job_forget':
@@ -229,7 +309,7 @@ class SSHManager {
       case 'sftp_download':
         return this.sftpDownload(args);
       default:
-        throw new Error(`Unknown SSH action: ${action}`);
+        throw unknownActionError({ tool: 'ssh', action, knownActions: SSH_ACTIONS });
     }
   }
 
@@ -244,7 +324,11 @@ class SSHManager {
       return normalizePublicKeyLine(raw);
     }
 
-    throw new Error('public_key or public_key_path is required');
+    throw ToolError.invalidParams({
+      field: 'public_key',
+      message: 'public_key or public_key_path is required',
+      hint: "Example: { action: 'authorized_keys_add', public_key: 'ssh-ed25519 AAAA... comment' }",
+    });
   }
 
   async authorizedKeysAdd(args = {}) {
@@ -293,7 +377,11 @@ class SSHManager {
 
     const marker = String(result.stdout || '').trim().split('\n').pop();
     if (result.exitCode !== 0) {
-      throw new Error(`authorized_keys_add failed: ${result.stderr || marker || 'unknown error'}`);
+      throw ToolError.internal({
+        code: 'SSH_AUTHORIZED_KEYS_ADD_FAILED',
+        message: `authorized_keys_add failed: ${result.stderr || marker || 'unknown error'}`,
+        hint: 'Check authorized_keys_path permissions and that the key format is valid.',
+      });
     }
 
     return {
@@ -324,7 +412,11 @@ class SSHManager {
 
     const profileName = await this.resolveProfileName(args.profile_name, args);
     if (!profileName) {
-      throw new Error('SSH connection requires profile_name or connection');
+      throw ToolError.invalidParams({
+        field: 'profile_name',
+        message: 'SSH connection requires profile_name or connection',
+        hint: "Example: { action: 'exec', profile_name: 'my-ssh', command: 'uname -a' }",
+      });
     }
 
     const profile = await this.profileService.getProfile(profileName, 'ssh');
@@ -374,7 +466,11 @@ class SSHManager {
 
     const policy = policyInput || (expectedFingerprint ? 'pin' : 'accept');
     if (policy === 'pin' && !expectedFingerprint) {
-      throw new Error('host_key_fingerprint_sha256 is required for host_key_policy=pin');
+      throw ToolError.invalidParams({
+        field: 'host_key_fingerprint_sha256',
+        message: 'host_key_fingerprint_sha256 is required for host_key_policy=pin',
+        hint: "Set { host_key_policy: 'accept' } (insecure), or provide { host_key_fingerprint_sha256: 'SHA256:...' }.",
+      });
     }
 
     if (policy !== 'accept') {
@@ -406,7 +502,11 @@ class SSHManager {
     } else if (resolvedConnection.password) {
       config.password = resolvedConnection.password;
     } else {
-      throw new Error('Provide password or private_key for SSH connection');
+      throw ToolError.invalidParams({
+        field: 'connection',
+        message: 'Provide password or private_key for SSH connection',
+        hint: 'Set connection.password, or connection.private_key/private_key_path (optionally passphrase).',
+      });
     }
 
     return config;
@@ -485,7 +585,12 @@ class SSHManager {
       const sshProfile = context?.target?.ssh_profile;
       if (!sshProfile) {
         if (context) {
-          throw new Error(`Project target '${context.targetName}' is missing ssh_profile`);
+          throw ToolError.invalidParams({
+            field: 'profile_name',
+            message: `Project target '${context.targetName}' is missing ssh_profile`,
+            hint: 'Add ssh_profile to the target (projects.json) or pass profile_name explicitly.',
+            details: { target: context.targetName },
+          });
         }
       } else {
         return this.validation.ensureString(String(sshProfile), 'Profile name');
@@ -501,7 +606,12 @@ class SSHManager {
       return undefined;
     }
 
-    throw new Error('profile_name is required when multiple profiles exist');
+    throw ToolError.invalidParams({
+      field: 'profile_name',
+      message: 'profile_name is required when multiple profiles exist',
+      hint: `Known profiles: ${profiles.slice(0, 20).map((p) => p.name).join(', ')}${profiles.length > 20 ? ', ...' : ''}.`,
+      details: { known_profiles: profiles.map((p) => p.name) },
+    });
   }
 
   async profileGet(profileName, includeSecrets = false) {
@@ -865,12 +975,12 @@ class SSHManager {
     const budgetMs = this.resolveToolCallBudgetMs();
     const requestedTimeoutMs = readPositiveInt(args.timeout_ms);
     if (requestedTimeoutMs && requestedTimeoutMs > budgetMs) {
-      const started = await this.execDetached({
+      const followed = await this.execFollow({
         ...args,
-        timeout_ms: this.resolveDetachedStartTimeoutMs(),
+        timeout_ms: requestedTimeoutMs,
       });
       return {
-        ...started,
+        ...followed,
         detached: true,
         requested_timeout_ms: requestedTimeoutMs,
       };
@@ -988,6 +1098,54 @@ class SSHManager {
     }
   }
 
+  async execFollow(args = {}) {
+    const startedAt = Date.now();
+    const budgetMs = this.resolveToolCallBudgetMs();
+
+    const startTimeoutMs = Math.min(
+      readPositiveInt(args.start_timeout_ms) ?? this.resolveDetachedStartTimeoutMs(),
+      budgetMs
+    );
+
+    const started = await this.execDetached({ ...args, timeout_ms: startTimeoutMs });
+    if (!started || started.success !== true || typeof started.job_id !== 'string' || !started.job_id.trim()) {
+      return {
+        success: false,
+        code: 'START_FAILED',
+        job_id: started?.job_id ?? null,
+        start: started,
+      };
+    }
+
+    const elapsed = Date.now() - startedAt;
+    const remaining = Math.max(0, budgetMs - elapsed);
+    const requestedWaitMs = readPositiveInt(args.timeout_ms) ?? 30000;
+    const waitTimeoutMs = Math.max(1, Math.min(requestedWaitMs, remaining));
+
+    const follow = await this.followJob({
+      ...args,
+      job_id: started.job_id,
+      timeout_ms: waitTimeoutMs,
+      lines: args.lines,
+    });
+
+    return {
+      success: Boolean(follow?.success),
+      job_id: started.job_id,
+      start: {
+        success: true,
+        pid: started.pid ?? null,
+        log_path: started.log_path,
+        pid_path: started.pid_path,
+        exit_path: started.exit_path,
+        start_timeout_ms: started.start_timeout_ms ?? startTimeoutMs,
+      },
+      wait: follow?.wait ?? null,
+      status: follow?.status ?? null,
+      logs: follow?.logs ?? null,
+    };
+  }
+
   async execOnce(connection, command, options, args) {
     const connectConfig = await this.materializeConnection(connection, args);
     const entry = await this.createClient(connectConfig, Symbol('inline'));
@@ -1016,6 +1174,10 @@ class SSHManager {
     const contextRoot = resolveContextRepoRoot();
     const streamArtifactsMode = contextRoot ? resolveStreamToArtifactMode() : null;
     const streamArtifactsRequested = Boolean(streamArtifactsMode);
+    const extraSecretValues = collectSecretValues(args.env);
+    const redactionOptions = extraSecretValues
+      ? { extraSecretValues, maxString: Number.POSITIVE_INFINITY }
+      : { maxString: Number.POSITIVE_INFINITY };
 
     return new Promise((resolve, reject) => {
       const started = Date.now();
@@ -1200,8 +1362,8 @@ class SSHManager {
               }
 
               return {
-                stdout: stdoutInlineBuffer.toString('utf8').trim(),
-                stderr: stderrInlineBuffer.toString('utf8').trim(),
+                stdout: stdoutInlineBuffer.toString('utf8'),
+                stderr: stderrInlineBuffer.toString('utf8'),
                 stdout_bytes: stdoutState.total,
                 stderr_bytes: stderrState.total,
                 stdout_captured_bytes: stdoutState.captured,
@@ -1254,7 +1416,8 @@ class SSHManager {
             if (shouldWriteStdout) {
               try {
                 const ref = buildToolCallFileRef({ traceId, spanId, filename: 'stdout.log' });
-                const written = await writeBinaryArtifact(contextRoot, ref, stdoutBuffer);
+                const redacted = redactText(stdoutBuffer.toString('utf8'), redactionOptions);
+                const written = await writeTextArtifact(contextRoot, ref, redacted);
                 stdoutRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
               } catch (artifactError) {
                 this.logger.warn('Failed to write SSH stdout artifact', { error: artifactError.message });
@@ -1264,7 +1427,8 @@ class SSHManager {
             if (shouldWriteStderr) {
               try {
                 const ref = buildToolCallFileRef({ traceId, spanId, filename: 'stderr.log' });
-                const written = await writeBinaryArtifact(contextRoot, ref, stderrBuffer);
+                const redacted = redactText(stderrBuffer.toString('utf8'), redactionOptions);
+                const written = await writeTextArtifact(contextRoot, ref, redacted);
                 stderrRef = { uri: written.uri, rel: written.rel, bytes: written.bytes };
               } catch (artifactError) {
                 this.logger.warn('Failed to write SSH stderr artifact', { error: artifactError.message });
@@ -1272,8 +1436,8 @@ class SSHManager {
             }
 
             return {
-              stdout: stdoutInlineBuffer.toString('utf8').trim(),
-              stderr: stderrInlineBuffer.toString('utf8').trim(),
+              stdout: stdoutInlineBuffer.toString('utf8'),
+              stderr: stderrInlineBuffer.toString('utf8'),
               stdout_bytes: stdoutState.total,
               stderr_bytes: stderrState.total,
               stdout_captured_bytes: stdoutBuffer.length,
@@ -1428,11 +1592,15 @@ class SSHManager {
     const pidRaw = args.pid ?? fromRegistry?.pid;
     const pid = pidRaw === undefined || pidRaw === null || pidRaw === '' ? null : Number(pidRaw);
     if (pid !== null && (!Number.isFinite(pid) || !Number.isInteger(pid) || pid <= 0)) {
-      throw new Error('pid must be a positive integer');
+      throw ToolError.invalidParams({ field: 'pid', message: 'pid must be a positive integer' });
     }
 
     if (requirePid && !pid && !pidPath) {
-      throw new Error('job requires pid or pid_path (or job_id with known pid_path)');
+      throw ToolError.invalidParams({
+        field: 'pid',
+        message: 'job requires pid or pid_path (or job_id with known pid_path)',
+        hint: "Example: { action: 'job_status', pid_path: '/tmp/my.pid' }",
+      });
     }
 
     return {
@@ -1557,7 +1725,11 @@ class SSHManager {
     }
     const logPath = spec.log_path;
     if (!logPath) {
-      throw new Error('log_path is required (or job_id with known log_path)');
+      throw ToolError.invalidParams({
+        field: 'log_path',
+        message: 'log_path is required (or job_id with known log_path)',
+        hint: "Example: { action: 'job_logs_tail', log_path: '/tmp/app.log' }",
+      });
     }
 
     const lines = Math.min(readPositiveInt(args.lines) ?? 200, 2000);
@@ -1582,6 +1754,206 @@ class SSHManager {
     };
   }
 
+  async tailJob(args = {}) {
+    const lines = Math.min(readPositiveInt(args.lines) ?? 120, 2000);
+    const budgetMs = this.resolveToolCallBudgetMs();
+
+    const status = await this.jobStatus({ ...args, timeout_ms: Math.min(10000, budgetMs) });
+    if (!status.success && status.code === 'NOT_FOUND') {
+      return status;
+    }
+
+    const logs = await this.jobLogsTail({ ...args, lines, timeout_ms: Math.min(10000, budgetMs) });
+    return {
+      success: Boolean(status.success && logs.success),
+      job_id: status.job_id ?? args.job_id,
+      status,
+      logs,
+    };
+  }
+
+  async followJob(args = {}) {
+    const lines = Math.min(readPositiveInt(args.lines) ?? 120, 2000);
+    const budgetMs = this.resolveToolCallBudgetMs();
+
+    const waitTimeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 30000, budgetMs);
+    const wait = await this.jobWait({ ...args, timeout_ms: waitTimeoutMs });
+    if (!wait.success && wait.code === 'NOT_FOUND') {
+      return wait;
+    }
+
+    const logs = await this.jobLogsTail({ ...args, lines, timeout_ms: Math.min(10000, budgetMs) });
+    return {
+      success: Boolean(wait.success && logs.success),
+      job_id: wait.status?.job_id ?? args.job_id,
+      wait,
+      status: wait.status ?? null,
+      logs,
+    };
+  }
+
+  async computeLocalSha256Hex(filePath) {
+    const hash = crypto.createHash('sha256');
+    const stream = fsSync.createReadStream(filePath);
+    for await (const chunk of stream) {
+      hash.update(chunk);
+    }
+    return hash.digest('hex');
+  }
+
+  parseSha256FromOutput(text) {
+    const match = String(text || '').match(/\b[a-fA-F0-9]{64}\b/);
+    return match ? match[0].toLowerCase() : null;
+  }
+
+  buildRemoteSha256Command(remotePath) {
+    const quoted = escapeShellValue(remotePath);
+    return [
+      'set -u',
+      `PATH_ARG=${quoted}`,
+      'if command -v sha256sum >/dev/null 2>&1; then sha256sum -- \"$PATH_ARG\" 2>/dev/null | awk \'{print $1}\'; exit 0; fi',
+      'if command -v shasum >/dev/null 2>&1; then shasum -a 256 -- \"$PATH_ARG\" 2>/dev/null | awk \'{print $1}\'; exit 0; fi',
+      'if command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 -- \"$PATH_ARG\" 2>/dev/null | awk \'{print $NF}\'; exit 0; fi',
+      'echo \"__SF_NO_SHA256__\"',
+      'exit 127',
+    ].join('\n');
+  }
+
+  async deployFile(args = {}) {
+    const started = Date.now();
+    const localPath = expandHomePath(this.validation.ensureString(args.local_path, 'local_path'));
+    const remotePath = this.validation.ensureString(args.remote_path, 'remote_path');
+
+    const overwrite = args.overwrite !== undefined ? args.overwrite === true : true;
+    const mkdirs = args.mkdirs === true;
+    const preserveMtime = args.preserve_mtime === true;
+
+    const localSha256 = await this.computeLocalSha256Hex(localPath);
+
+    let uploadError = null;
+    try {
+      await this.sftpUpload({ ...args, local_path: localPath, remote_path: remotePath, overwrite, mkdirs, preserve_mtime: preserveMtime });
+    } catch (error) {
+      uploadError = error?.message || String(error);
+      return {
+        success: false,
+        code: 'UPLOAD_FAILED',
+        local_path: localPath,
+        remote_path: remotePath,
+        local_sha256: localSha256,
+        error: uploadError,
+        duration_ms: Date.now() - started,
+      };
+    }
+
+    const verifyStarted = Date.now();
+    const hashCmd = this.buildRemoteSha256Command(remotePath);
+    const hashExec = await this.execCommand({
+      ...args,
+      cwd: undefined,
+      pty: false,
+      command: hashCmd,
+    });
+    const remoteSha256 = this.parseSha256FromOutput(hashExec.stdout);
+    const verifyMs = Date.now() - verifyStarted;
+
+    if (!remoteSha256) {
+      return {
+        success: false,
+        code: 'REMOTE_HASH_FAILED',
+        local_path: localPath,
+        remote_path: remotePath,
+        local_sha256: localSha256,
+        remote_sha256: null,
+        verify_ms: verifyMs,
+        duration_ms: Date.now() - started,
+        error: 'Unable to parse remote sha256 output',
+        remote_stdout: hashExec.stdout,
+        remote_stderr: hashExec.stderr,
+        remote_exit_code: hashExec.exitCode,
+      };
+    }
+
+    if (remoteSha256 !== localSha256) {
+      return {
+        success: false,
+        code: 'HASH_MISMATCH',
+        local_path: localPath,
+        remote_path: remotePath,
+        local_sha256: localSha256,
+        remote_sha256: remoteSha256,
+        verify_ms: verifyMs,
+        duration_ms: Date.now() - started,
+      };
+    }
+
+    const restartService = args.restart !== undefined && args.restart !== null && String(args.restart).trim().length
+      ? String(args.restart).trim()
+      : null;
+    const restartCommand = args.restart_command !== undefined && args.restart_command !== null && String(args.restart_command).trim().length
+      ? String(args.restart_command).trim()
+      : null;
+
+    if (restartService && restartCommand) {
+      return {
+        success: false,
+        code: 'INVALID_RESTART',
+        message: 'Provide only one of restart (service) or restart_command',
+        local_path: localPath,
+        remote_path: remotePath,
+        local_sha256: localSha256,
+        remote_sha256: remoteSha256,
+        duration_ms: Date.now() - started,
+      };
+    }
+
+    let restartResult = null;
+    if (restartService || restartCommand) {
+      const restartStarted = Date.now();
+      const cmd = restartCommand || `systemctl restart ${escapeShellValue(restartService)} && systemctl is-active ${escapeShellValue(restartService)}`;
+      const out = await this.execCommand({
+        ...args,
+        cwd: undefined,
+        pty: false,
+        command: cmd,
+      });
+      restartResult = {
+        requested: true,
+        service: restartService,
+        exit_code: Number.isFinite(out.exitCode) ? out.exitCode : null,
+        timed_out: Boolean(out.timedOut || out.hardTimedOut),
+        restart_ms: Date.now() - restartStarted,
+      };
+      if (restartResult.exit_code !== 0 || restartResult.timed_out) {
+        return {
+          success: false,
+          code: 'RESTART_FAILED',
+          local_path: localPath,
+          remote_path: remotePath,
+          local_sha256: localSha256,
+          remote_sha256: remoteSha256,
+          restart: restartResult,
+          duration_ms: Date.now() - started,
+        };
+      }
+    }
+
+    return {
+      success: true,
+      local_path: localPath,
+      remote_path: remotePath,
+      overwrite,
+      mkdirs,
+      preserve_mtime: preserveMtime,
+      local_sha256: localSha256,
+      remote_sha256: remoteSha256,
+      verified: true,
+      verify_ms: verifyMs,
+      restart: restartResult,
+      duration_ms: Date.now() - started,
+    };
+  }
+
   async jobKill(args = {}) {
     const job = this.resolveJobSpec(args);
     if (job.not_found) {
@@ -1592,7 +1964,10 @@ class SSHManager {
 
     const rawSignal = args.signal === undefined || args.signal === null ? 'TERM' : String(args.signal).trim();
     if (!/^[A-Za-z0-9]+$/.test(rawSignal)) {
-      throw new Error('signal must be an alphanumeric string (e.g. TERM, KILL, 9)');
+      throw ToolError.invalidParams({
+        field: 'signal',
+        message: 'signal must be an alphanumeric string (e.g. TERM, KILL, 9)',
+      });
     }
     const signal = rawSignal.toUpperCase();
 
@@ -1620,7 +1995,11 @@ class SSHManager {
     });
 
     if (exec.exitCode !== 0) {
-      throw new Error(exec.stderr || `job_kill failed (exitCode=${exec.exitCode})`);
+      throw ToolError.internal({
+        code: 'SSH_JOB_KILL_FAILED',
+        message: exec.stderr || `job_kill failed (exitCode=${exec.exitCode})`,
+        hint: 'Check that the PID exists and the SSH user has permissions to send signals.',
+      });
     }
 
     return {
@@ -1641,7 +2020,11 @@ class SSHManager {
   async batch(args) {
     const commands = Array.isArray(args.commands) ? args.commands : [];
     if (commands.length === 0) {
-      throw new Error('commands must be a non-empty array');
+      throw ToolError.invalidParams({
+        field: 'commands',
+        message: 'commands must be a non-empty array',
+        hint: "Example: { action: 'batch', commands: [{ command: 'uname -a' }, { command: 'whoami' }] }",
+      });
     }
 
     const parallel = !!args.parallel;
@@ -1845,7 +2228,12 @@ class SSHManager {
     if (!overwrite) {
       try {
         await fs.access(localPath);
-        throw new Error(`Local path already exists: ${localPath}`);
+        throw ToolError.conflict({
+          code: 'LOCAL_PATH_EXISTS',
+          message: `Local path already exists: ${localPath}`,
+          hint: 'Set overwrite=true to replace it.',
+          details: { local_path: localPath },
+        });
       } catch (error) {
         if (error.code !== 'ENOENT') {
           throw error;

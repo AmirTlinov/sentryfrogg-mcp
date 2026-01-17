@@ -37,9 +37,10 @@ function parseToolText(resp) {
 }
 
 function parseTraceId(text) {
-  const traceLine = text.split('\n').find((line) => line.startsWith('N: trace_id:'));
-  assert.ok(traceLine, `expected trace_id in output, got:\n${text}`);
-  return traceLine.replace('N: trace_id:', '').trim();
+  const envelope = JSON.parse(text);
+  const traceId = envelope?.trace?.trace_id;
+  assert.ok(traceId, `expected trace.trace_id in output, got:\n${text}`);
+  return traceId;
 }
 
 async function writeKubectlStub(dir) {
@@ -285,8 +286,10 @@ test('workspace.run gitops.release (argocd) performs full loop and marks verifie
         })
       )}\n`
     );
-    const verifiedText = parseToolText(JSON.parse(await readLine(proc.stdout)));
-    assert.ok(verifiedText.includes('N: result: true'), `expected verified marker, got:\n${verifiedText}`);
+    const verified = JSON.parse(parseToolText(JSON.parse(await readLine(proc.stdout))));
+    assert.equal(verified.tool, 'mcp_state');
+    assert.equal(verified.action, 'get');
+    assert.equal(verified.result, true);
 
     const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
     assert.equal(state.argocd_patches, 1);

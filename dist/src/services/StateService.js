@@ -8,6 +8,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const fs = require('fs/promises');
 const { resolveStatePath } = require('../utils/paths');
 const { atomicWriteTextFile } = require('../utils/fsAtomic');
+const ToolError = require('../errors/ToolError');
 class StateService {
     constructor(logger) {
         this.logger = logger.child('state');
@@ -53,12 +54,17 @@ class StateService {
         if (normalized === 'session' || normalized === 'persistent' || normalized === 'any') {
             return normalized;
         }
-        throw new Error('scope must be one of: session, persistent, any');
+        throw ToolError.invalidParams({
+            field: 'scope',
+            message: 'scope must be one of: session, persistent, any',
+            expected: 'session | persistent | any',
+            received: String(scope),
+        });
     }
     async set(key, value, scope) {
         await this.ensureReady();
         if (typeof key !== 'string' || key.trim().length === 0) {
-            throw new Error('State key must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'key', message: 'State key must be a non-empty string' });
         }
         const normalized = this.normalizeScope(scope);
         if (normalized === 'session') {
@@ -74,7 +80,7 @@ class StateService {
     async get(key, scope) {
         await this.ensureReady();
         if (typeof key !== 'string' || key.trim().length === 0) {
-            throw new Error('State key must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'key', message: 'State key must be a non-empty string' });
         }
         const normalized = this.normalizeScope(scope || 'any');
         const trimmed = key.trim();
@@ -125,7 +131,7 @@ class StateService {
     async unset(key, scope) {
         await this.ensureReady();
         if (typeof key !== 'string' || key.trim().length === 0) {
-            throw new Error('State key must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'key', message: 'State key must be a non-empty string' });
         }
         const normalized = this.normalizeScope(scope || 'any');
         const trimmed = key.trim();

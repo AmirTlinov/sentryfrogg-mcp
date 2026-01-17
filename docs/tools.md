@@ -28,6 +28,7 @@ All tools accept optional fields for output shaping and state capture:
 - `output`: `{ path, pick, omit, map, missing, default }`
 - `store_as`: string key or `{ key, scope }`
 - `store_scope`: `session` | `persistent` (when `store_as` is a string)
+- `response_mode`: `ai` | `compact` (default: `ai`; `compact` is currently equivalent to `ai`)
 - `trace_id`: propagate a trace identifier through logs and responses
 - `span_id` / `parent_span_id`: span correlation for distributed traces
 - `preset` / `preset_name`: apply a stored preset before merging call arguments
@@ -45,6 +46,28 @@ Example:
   "store_as": "orders_snapshot",
   "store_scope": "session"
 }
+```
+
+## Errors
+
+SentryFrogg returns typed, actionable errors (fail-closed). You should almost never have to guess.
+
+What to expect:
+- Schema validation errors include `Did you mean: ...` for typos and unknown fields.
+- Runtime validation errors use `ToolError.invalid_params` / `denied` / `not_found` / `conflict` and usually include a `hint`.
+- For command-style tools, failures often include a redacted `artifact://...` pointer (stderr/log) in the error hint.
+- If stuck: call `help({ tool, action })` to see the current enum + minimal usage.
+- Common parameter aliases are accepted (e.g. `cmd` → `command`, `timeout` → `timeout_ms`). When applied, the JSON envelope includes `normalization` (renamed/converted/ignored).
+
+Example error header:
+
+```
+SentryFroggError
+tool: mcp_ssh_manager
+kind: invalid_params
+code: INVALID_PARAMS
+message: ...
+hint: ...
 ```
 
 ## Quick start: `project` → `target`
@@ -88,6 +111,12 @@ Notes:
 
 Purpose: discover available tools and their intended usage.
 
+Notes:
+- Built-in aliases are supported (e.g. `ssh`, `psql`, `api`, `repo`, `job`, `artifacts`).
+- If you typo a tool/action, `help` returns `did_you_mean` / `did_you_mean_actions`.
+- You can search by keywords: `help({ query: "ssh exec" })` (returns matching tools/actions/fields/aliases).
+- `help({ query, limit })` limits the number of returned matches (default: 20).
+
 Example:
 
 ```json
@@ -115,6 +144,87 @@ Example:
   "key": "token",
   "value": "abc123",
   "scope": "session"
+}
+```
+
+## `mcp_artifacts`
+
+Artifacts are files written under the configured context root (tool-call logs, `result.json`, spills, downloads).
+
+Key actions:
+- `get` / `head` / `tail` / `list`
+
+Safe defaults:
+- `encoding: "utf8"` returns a redacted view (`redacted: true|false`).
+- `encoding: "base64"` is **blocked for text artifacts** unless you explicitly opt in with `include_secrets: true`.
+
+Example (redacted view):
+
+```json
+{ "action": "get", "uri": "artifact://runs/<trace>/tool_calls/<span>/result.json", "max_bytes": 16384 }
+```
+
+Break-glass (raw view; disabled by default):
+
+```json
+{
+  "action": "get",
+  "uri": "artifact://runs/<trace>/tool_calls/<span>/stdout.log",
+  "encoding": "base64",
+  "include_secrets": true
+}
+```
+
+Notes:
+- `include_secrets: true` only works when `SENTRYFROGG_ALLOW_SECRET_EXPORT=1` (or `SF_ALLOW_SECRET_EXPORT=1`) is set.
+- Base64 is intended for binary artifacts; for text logs use UTF-8 redacted views.
+
+## `mcp_jobs`
+
+Unified async job registry (status/wait/logs/follow/cancel/list). Mainly used with long-running SSH commands.
+
+Key actions:
+- `job_status` / `job_wait` / `job_logs_tail`
+- `tail_job` / `follow_job`
+- `job_cancel` / `job_forget` / `job_list`
+
+Example (follow a running job with live-ish progress):
+
+```json
+{ "action": "follow_job", "job_id": "<job_id>", "timeout_ms": 600000, "lines": 120 }
+```
+
+## `mcp_repo`
+
+Safe-by-default repo runner: sandboxed filesystem, no shell, allowlisted exec.
+
+Key actions:
+- Read-only: `repo_info` / `assert_clean` / `git_diff` / `render` / `exec`
+- Write (requires `apply: true`): `apply_patch` / `git_commit` / `git_revert` / `git_push`
+
+Notes:
+- Write actions are fail-closed unless `apply: true` is provided.
+- `exec` only runs allowlisted commands and never uses a shell.
+
+Repo info example (project-aware):
+
+```json
+{ "action": "repo_info", "target": "prod" }
+```
+
+Exec example (read-only allowlist; no shell):
+
+```json
+{ "action": "exec", "command": "git", "args": ["status", "--porcelain"], "inline": true }
+```
+
+Apply patch example (requires `apply: true`):
+
+```json
+{
+  "action": "apply_patch",
+  "apply": true,
+  "patch": "*** Begin Patch\\n*** Add File: hello.txt\\n+Hello\\n*** End Patch\\n"
 }
 ```
 
@@ -208,6 +318,7 @@ Example (summary):
 Notes:
 - Context is stored in `context.json` under the profiles directory (`MCP_CONTEXT_PATH` overrides).
 - Context only contains safe metadata (paths + detected tags), not secrets.
+- `summary` includes `signals_true`, `evidence_files`, and `git_root` to reduce guessing (why a signal was detected).
 
 ## `mcp_workspace`
 
@@ -659,8 +770,10 @@ SSH executor with profiles, single exec, batch runs, and diagnostics.
 Key actions:
 - `profile_upsert` / `profile_get` / `profile_list` / `profile_delete` / `profile_test`
 - `authorized_keys_add`
-- `exec` / `batch` / `system_info` / `check_host`
-- `sftp_list` / `sftp_upload` / `sftp_download`
+- `exec` / `exec_detached` / `exec_follow`
+- `job_status` / `job_wait` / `job_logs_tail` / `tail_job` / `follow_job` / `job_kill` / `job_forget`
+- `batch` / `system_info` / `check_host`
+- `sftp_list` / `sftp_upload` / `sftp_download` / `deploy_file`
 
 Profile example:
 
@@ -679,6 +792,9 @@ Profile example:
 
 Notes:
 - `connection.password` / `connection.private_key` / `connection.passphrase` can be SecretRefs (`ref:vault:kv2:*` / `ref:env:*`) and are resolved at execution time.
+- Exec modes:
+  - Use `exec_follow` for long-running commands (starts a detached job + returns `wait/status/logs`).
+  - `exec` may automatically switch to follow-mode when `timeout_ms` exceeds the MCP tool-call budget (`SENTRYFROGG_TOOL_CALL_TIMEOUT_MS` / `SF_TOOL_CALL_TIMEOUT_MS`), to avoid “detached silence”.
 - SSH host key verification:
   - `host_key_policy`: `accept` (default), `tofu` (trust-on-first-use), `pin` (strict match).
   - `host_key_fingerprint_sha256`: expected fingerprint (`SHA256:<base64>` or `<base64>`). If fingerprint is present and policy is omitted, policy defaults to `pin`.
@@ -727,6 +843,12 @@ Exec example:
   "profile_name": "default",
   "command": "uname -a"
 }
+```
+
+Follow example (best for long-running commands):
+
+```json
+{ "action": "exec_follow", "profile_name": "default", "command": "sleep 5 && echo ok", "timeout_ms": 30000 }
 ```
 
 Batch example:

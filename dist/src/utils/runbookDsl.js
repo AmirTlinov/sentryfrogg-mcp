@@ -3,6 +3,14 @@
 // @ts-nocheck
 Object.defineProperty(exports, "__esModule", { value: true });
 const { mergeDeep, isPlainObject } = require('./merge');
+const ToolError = require('../errors/ToolError');
+function dslInvalid(message) {
+    return ToolError.invalidParams({
+        field: 'dsl',
+        message,
+        hint: 'DSL directives: runbook, description, step, tool, action, args, arg, when, foreach, continue_on_error.',
+    });
+}
 function parseValue(raw) {
     const trimmed = String(raw || '').trim();
     if (!trimmed) {
@@ -45,12 +53,12 @@ function parseKeyValue(raw) {
     const trimmed = String(raw || '').trim();
     const eqIndex = trimmed.indexOf('=');
     if (eqIndex === -1) {
-        throw new Error('arg directive requires key=value');
+        throw dslInvalid('arg directive requires key=value');
     }
     const key = trimmed.slice(0, eqIndex).trim();
     const valueRaw = trimmed.slice(eqIndex + 1).trim();
     if (!key) {
-        throw new Error('arg directive requires key=value');
+        throw dslInvalid('arg directive requires key=value');
     }
     return { key, value: parseValue(valueRaw) };
 }
@@ -83,7 +91,7 @@ function parseRunbookDsl(dsl) {
                 const tool = tokens.shift();
                 const action = tokens.shift();
                 if (!id || !tool) {
-                    throw new Error(`step requires id and tool at line ${lineIndex + 1}`);
+                    throw dslInvalid(`step requires id and tool at line ${lineIndex + 1}`);
                 }
                 const step = { id, tool, args: {} };
                 if (action) {
@@ -101,31 +109,31 @@ function parseRunbookDsl(dsl) {
             }
             case 'tool':
                 if (!current) {
-                    throw new Error(`tool directive before step at line ${lineIndex + 1}`);
+                    throw dslInvalid(`tool directive before step at line ${lineIndex + 1}`);
                 }
                 current.tool = rest;
                 break;
             case 'action':
                 if (!current) {
-                    throw new Error(`action directive before step at line ${lineIndex + 1}`);
+                    throw dslInvalid(`action directive before step at line ${lineIndex + 1}`);
                 }
                 current.args = current.args || {};
                 current.args.action = rest;
                 break;
             case 'args': {
                 if (!current) {
-                    throw new Error(`args directive before step at line ${lineIndex + 1}`);
+                    throw dslInvalid(`args directive before step at line ${lineIndex + 1}`);
                 }
                 const parsed = parseValue(rest);
                 if (!isPlainObject(parsed)) {
-                    throw new Error(`args directive expects JSON object at line ${lineIndex + 1}`);
+                    throw dslInvalid(`args directive expects JSON object at line ${lineIndex + 1}`);
                 }
                 current.args = mergeDeep(current.args || {}, parsed);
                 break;
             }
             case 'arg': {
                 if (!current) {
-                    throw new Error(`arg directive before step at line ${lineIndex + 1}`);
+                    throw dslInvalid(`arg directive before step at line ${lineIndex + 1}`);
                 }
                 const { key, value } = parseKeyValue(rest);
                 current.args = current.args || {};
@@ -134,7 +142,7 @@ function parseRunbookDsl(dsl) {
             }
             case 'when': {
                 if (!current) {
-                    throw new Error(`when directive before step at line ${lineIndex + 1}`);
+                    throw dslInvalid(`when directive before step at line ${lineIndex + 1}`);
                 }
                 const parsed = parseValue(rest);
                 current.when = parsed;
@@ -142,7 +150,7 @@ function parseRunbookDsl(dsl) {
             }
             case 'foreach': {
                 if (!current) {
-                    throw new Error(`foreach directive before step at line ${lineIndex + 1}`);
+                    throw dslInvalid(`foreach directive before step at line ${lineIndex + 1}`);
                 }
                 const parsed = parseValue(rest);
                 current.foreach = parsed;
@@ -150,17 +158,17 @@ function parseRunbookDsl(dsl) {
             }
             case 'continue_on_error': {
                 if (!current) {
-                    throw new Error(`continue_on_error directive before step at line ${lineIndex + 1}`);
+                    throw dslInvalid(`continue_on_error directive before step at line ${lineIndex + 1}`);
                 }
                 current.continue_on_error = parseValue(rest) === true;
                 break;
             }
             default:
-                throw new Error(`Unknown DSL directive '${directive}' at line ${lineIndex + 1}`);
+                throw dslInvalid(`Unknown DSL directive '${directive}' at line ${lineIndex + 1}`);
         }
     }
     if (!Array.isArray(runbook.steps) || runbook.steps.length === 0) {
-        throw new Error('runbook DSL must define at least one step');
+        throw dslInvalid('runbook DSL must define at least one step');
     }
     return runbook;
 }

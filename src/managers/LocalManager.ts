@@ -21,6 +21,8 @@ const path = require('node:path');
 const { atomicReplaceFile, ensureDirForFile, pathExists, tempSiblingPath } = require('../utils/fsAtomic');
 const { isUnsafeLocalEnabled } = require('../utils/featureFlags');
 const { expandHomePath } = require('../utils/userPaths');
+const ToolError = require('../errors/ToolError');
+const { unknownActionError } = require('../utils/toolErrors');
 
 function buildTempDir() {
   return path.join(os.tmpdir(), `sentryfrogg-local-${process.pid}`);
@@ -28,6 +30,21 @@ function buildTempDir() {
 
 function randomToken() {
   return crypto.randomBytes(6).toString('hex');
+}
+
+const DEFAULT_STDOUT_INLINE_BYTES = 32 * 1024;
+const DEFAULT_STDERR_INLINE_BYTES = 16 * 1024;
+const LOCAL_ACTIONS = ['exec', 'batch', 'fs_read', 'fs_write', 'fs_list', 'fs_stat', 'fs_mkdir', 'fs_rm'];
+
+function readPositiveInt(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return Math.floor(numeric);
 }
 
 class LocalManager {
@@ -44,7 +61,11 @@ class LocalManager {
 
   ensureEnabled() {
     if (!this.enabled) {
-      throw new Error('Unsafe local tool is disabled. Set SENTRYFROGG_UNSAFE_LOCAL=1 to enable it.');
+      throw ToolError.denied({
+        code: 'UNSAFE_LOCAL_DISABLED',
+        message: 'Unsafe local tool is disabled.',
+        hint: 'Set SENTRYFROGG_UNSAFE_LOCAL=1 (or SF_UNSAFE_LOCAL=1) to enable it.',
+      });
     }
   }
 
@@ -71,7 +92,7 @@ class LocalManager {
       case 'fs_rm':
         return this.fsRm(args);
       default:
-        throw new Error(`Unknown local action: ${action}`);
+        throw unknownActionError({ tool: 'local', action, knownActions: LOCAL_ACTIONS });
     }
   }
 
@@ -80,7 +101,7 @@ class LocalManager {
       return undefined;
     }
     if (typeof env !== 'object' || Array.isArray(env)) {
-      throw new Error('env must be an object');
+      throw ToolError.invalidParams({ field: 'env', message: 'env must be an object' });
     }
     return Object.fromEntries(
       Object.entries(env).flatMap(([key, value]) => {
@@ -128,6 +149,41 @@ class LocalManager {
       let finished = false;
       let timedOut = false;
 
+      const maxStdoutInlineBytes = Math.min(
+        readPositiveInt(process.env.SENTRYFROGG_LOCAL_EXEC_MAX_STDOUT_INLINE_BYTES || process.env.SF_LOCAL_EXEC_MAX_STDOUT_INLINE_BYTES)
+          ?? DEFAULT_STDOUT_INLINE_BYTES,
+        256 * 1024
+      );
+
+      const maxStderrInlineBytes = Math.min(
+        readPositiveInt(process.env.SENTRYFROGG_LOCAL_EXEC_MAX_STDERR_INLINE_BYTES || process.env.SF_LOCAL_EXEC_MAX_STDERR_INLINE_BYTES)
+          ?? DEFAULT_STDERR_INLINE_BYTES,
+        256 * 1024
+      );
+
+      const stdoutPreview = inline ? { buffers: [], captured: 0, truncated: false, limit: maxStdoutInlineBytes } : null;
+      const stderrPreview = inline ? { buffers: [], captured: 0, truncated: false, limit: maxStderrInlineBytes } : null;
+
+      const capturePreview = (chunk, state) => {
+        if (!state) {
+          return;
+        }
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? '');
+        if (state.captured >= state.limit) {
+          state.truncated = true;
+          return;
+        }
+        const remaining = state.limit - state.captured;
+        if (buf.length <= remaining) {
+          state.buffers.push(buf);
+          state.captured += buf.length;
+          return;
+        }
+        state.buffers.push(buf.subarray(0, remaining));
+        state.captured += remaining;
+        state.truncated = true;
+      };
+
       const child = argv
         ? spawn(command, argv, { cwd, env, shell: false })
         : spawn(command, { cwd, env, shell: shell === true ? true : shell });
@@ -158,6 +214,13 @@ class LocalManager {
         const outStat = await fs.stat(stdoutPath).catch(() => null);
         const errStat = await fs.stat(stderrPath).catch(() => null);
 
+        const stdoutInlineBuffer = stdoutPreview && stdoutPreview.captured
+          ? Buffer.concat(stdoutPreview.buffers, stdoutPreview.captured)
+          : Buffer.alloc(0);
+        const stderrInlineBuffer = stderrPreview && stderrPreview.captured
+          ? Buffer.concat(stderrPreview.buffers, stderrPreview.captured)
+          : Buffer.alloc(0);
+
         const payload = {
           success: result.exit_code === 0,
           command,
@@ -174,10 +237,12 @@ class LocalManager {
         };
 
         if (inline) {
-          const stdout = await fs.readFile(stdoutPath, 'utf8').catch(() => '');
-          const stderr = await fs.readFile(stderrPath, 'utf8').catch(() => '');
-          payload.stdout = stdout.trimEnd();
-          payload.stderr = stderr.trimEnd();
+          payload.stdout = stdoutInlineBuffer.toString('utf8').trimEnd();
+          payload.stderr = stderrInlineBuffer.toString('utf8').trimEnd();
+          payload.stdout_inline_bytes = stdoutInlineBuffer.length;
+          payload.stderr_inline_bytes = stderrInlineBuffer.length;
+          payload.stdout_inline_truncated = Boolean(stdoutPreview?.truncated) || (payload.stdout_bytes > stdoutInlineBuffer.length);
+          payload.stderr_inline_truncated = Boolean(stderrPreview?.truncated) || (payload.stderr_bytes > stderrInlineBuffer.length);
         }
 
         this.stats.exec += 1;
@@ -202,9 +267,15 @@ class LocalManager {
       });
 
       if (child.stdout) {
+        if (stdoutPreview) {
+          child.stdout.on('data', (chunk) => capturePreview(chunk, stdoutPreview));
+        }
         child.stdout.pipe(stdoutStream);
       }
       if (child.stderr) {
+        if (stderrPreview) {
+          child.stderr.on('data', (chunk) => capturePreview(chunk, stderrPreview));
+        }
         child.stderr.pipe(stderrStream);
       }
 
@@ -219,7 +290,11 @@ class LocalManager {
   async batch(args) {
     const commands = Array.isArray(args.commands) ? args.commands : [];
     if (commands.length === 0) {
-      throw new Error('commands must be a non-empty array');
+      throw ToolError.invalidParams({
+        field: 'commands',
+        message: 'commands must be a non-empty array',
+        hint: 'Provide at least one command: [{ command: \"echo\", args: [\"hi\"] }].',
+      });
     }
 
     const parallel = !!args.parallel;
@@ -303,7 +378,12 @@ class LocalManager {
     const overwrite = args.overwrite === true;
 
     if (!overwrite && await pathExists(filePath)) {
-      throw new Error(`Local path already exists: ${filePath}`);
+      throw ToolError.conflict({
+        code: 'LOCAL_PATH_EXISTS',
+        message: `Local path already exists: ${filePath}`,
+        hint: 'Set overwrite=true to replace it.',
+        details: { path: filePath },
+      });
     }
 
     const mode = args.mode !== undefined ? Number(args.mode) : 0o600;
@@ -325,7 +405,11 @@ class LocalManager {
           await fs.writeFile(tmpPath, String(args.content), { encoding: 'utf8', mode });
         }
       } else {
-        throw new Error('content or content_base64 is required');
+        throw ToolError.invalidParams({
+          field: 'content',
+          message: 'content or content_base64 is required',
+          hint: 'Provide either args.content (utf8) or args.content_base64.',
+        });
       }
 
       await atomicReplaceFile(tmpPath, filePath, { overwrite, mode });

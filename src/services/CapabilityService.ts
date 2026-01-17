@@ -8,6 +8,7 @@
 const fs = require('fs/promises');
 const { resolveCapabilitiesPath, resolveDefaultCapabilitiesPath } = require('../utils/paths');
 const { atomicWriteTextFile } = require('../utils/fsAtomic');
+const ToolError = require('../errors/ToolError');
 
 class CapabilityService {
   constructor(logger, security) {
@@ -111,12 +112,17 @@ class CapabilityService {
   async getCapability(name) {
     await this.ensureReady();
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('Capability name must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'name', message: 'Capability name must be a non-empty string' });
     }
     const key = name.trim();
     const entry = this.capabilities.get(key);
     if (!entry) {
-      throw new Error(`Capability '${name}' not found`);
+      throw ToolError.notFound({
+        code: 'CAPABILITY_NOT_FOUND',
+        message: `Capability '${name}' not found`,
+        hint: 'Use action=capability_list to see known capabilities.',
+        details: { name: key },
+      });
     }
     return entry;
   }
@@ -129,7 +135,7 @@ class CapabilityService {
   async findAllByIntent(intentType) {
     await this.ensureReady();
     if (typeof intentType !== 'string' || intentType.trim().length === 0) {
-      throw new Error('Intent type must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'intent.type', message: 'Intent type must be a non-empty string' });
     }
     const key = intentType.trim();
 
@@ -151,10 +157,10 @@ class CapabilityService {
   async setCapability(name, config) {
     await this.ensureReady();
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('Capability name must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'name', message: 'Capability name must be a non-empty string' });
     }
     if (typeof config !== 'object' || config === null || Array.isArray(config)) {
-      throw new Error('Capability config must be an object');
+      throw ToolError.invalidParams({ field: 'config', message: 'Capability config must be an object' });
     }
 
     const trimmedName = name.trim();
@@ -184,7 +190,12 @@ class CapabilityService {
   async deleteCapability(name) {
     await this.ensureReady();
     if (!this.capabilities.delete(name)) {
-      throw new Error(`Capability '${name}' not found`);
+      throw ToolError.notFound({
+        code: 'CAPABILITY_NOT_FOUND',
+        message: `Capability '${name}' not found`,
+        hint: 'Use action=capability_list to see known capabilities.',
+        details: { name: String(name || '').trim() },
+      });
     }
     await this.persist();
     return { success: true };

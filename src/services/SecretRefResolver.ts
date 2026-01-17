@@ -7,6 +7,8 @@
  * Goal: a single, safe place to resolve secrets at runtime without mutating input configs.
  */
 
+const ToolError = require('../errors/ToolError');
+
 class SecretRefResolver {
   constructor(logger, validation, profileService, vaultClient, projectResolver) {
     this.logger = logger.child('secrets');
@@ -33,7 +35,11 @@ class SecretRefResolver {
     }
 
     if (!this.profileService) {
-      throw new Error('vault profile is required (profileService missing)');
+      throw ToolError.internal({
+        code: 'VAULT_PROFILE_UNAVAILABLE',
+        message: 'vault profile is required (profileService missing)',
+        hint: 'This is a server configuration error. Enable ProfileService / VaultClient in bootstrap.',
+      });
     }
 
     const profiles = await this.profileService.listProfiles('vault');
@@ -41,9 +47,18 @@ class SecretRefResolver {
       return profiles[0].name;
     }
     if (profiles.length === 0) {
-      throw new Error('vault profile is required (no vault profiles exist)');
+      throw ToolError.invalidParams({
+        field: 'vault_profile_name',
+        message: 'vault profile is required (no vault profiles exist)',
+        hint: 'Create a vault profile first, or pass args.vault_profile_name explicitly.',
+      });
     }
-    throw new Error('vault profile is required when multiple vault profiles exist');
+    throw ToolError.invalidParams({
+      field: 'vault_profile_name',
+      message: 'vault profile is required when multiple vault profiles exist',
+      hint: 'Pass args.vault_profile_name explicitly (or configure target.vault_profile in project).',
+      details: { known_profiles: profiles.map((p) => p.name) },
+    });
   }
 
   async resolveRefString(value, args = {}, cache) {
@@ -54,7 +69,11 @@ class SecretRefResolver {
     const spec = value.slice(4);
     if (spec.startsWith('vault:kv2:')) {
       if (!this.vaultClient) {
-        throw new Error('vault refs require VaultClient (server misconfiguration)');
+        throw ToolError.internal({
+          code: 'VAULT_CLIENT_UNAVAILABLE',
+          message: 'vault refs require VaultClient (server misconfiguration)',
+          hint: 'Enable VaultClient in server bootstrap.',
+        });
       }
       const ref = spec.slice('vault:kv2:'.length);
       const profileName = await this.resolveVaultProfileName(args);
@@ -66,11 +85,20 @@ class SecretRefResolver {
     if (spec.startsWith('env:')) {
       const envKey = spec.slice('env:'.length).trim();
       if (!envKey) {
-        throw new Error('ref:env requires a non-empty env var name');
+        throw ToolError.invalidParams({
+          field: 'ref',
+          message: 'ref:env requires a non-empty env var name',
+          hint: 'Example: \"ref:env:MY_TOKEN\".',
+        });
       }
       const fromEnv = process.env[envKey];
       if (fromEnv === undefined) {
-        throw new Error(`ref:env var is not set: ${envKey}`);
+        throw ToolError.notFound({
+          code: 'ENV_VAR_NOT_SET',
+          message: `ref:env var is not set: ${envKey}`,
+          hint: 'Set the env var in the server environment, or use ref:vault:kv2:<mount>/<path>#<key>.',
+          details: { env: envKey },
+        });
       }
       const resolved = String(fromEnv);
       cache?.set(value, resolved);
@@ -78,7 +106,12 @@ class SecretRefResolver {
     }
 
     const scheme = spec.split(':')[0] || 'unknown';
-    throw new Error(`Unknown secret ref scheme: ${scheme}`);
+    throw ToolError.invalidParams({
+      field: 'ref',
+      message: `Unknown secret ref scheme: ${scheme}`,
+      hint: 'Supported schemes: ref:vault:kv2:<mount>/<path>#<key>, ref:env:<ENV_VAR>.',
+      details: { scheme },
+    });
   }
 
   async resolveDeep(input, args = {}) {
@@ -124,4 +157,3 @@ class SecretRefResolver {
 }
 
 module.exports = SecretRefResolver;
-

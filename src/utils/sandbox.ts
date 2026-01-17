@@ -3,19 +3,24 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const ToolError = require('../errors/ToolError');
 
 function ensureInsideRoot(root, candidate) {
   if (candidate === root) {
     return;
   }
   if (!candidate.startsWith(`${root}${path.sep}`)) {
-    throw new Error('Path escapes sandbox root');
+    throw ToolError.denied({
+      code: 'PATH_ESCAPES_SANDBOX',
+      message: 'Path escapes sandbox root',
+      hint: 'Use a path inside repo_root (sandbox root).',
+    });
   }
 }
 
 async function resolveSandboxPath(rootDir, candidatePath, options = {}) {
   if (typeof rootDir !== 'string' || rootDir.trim().length === 0) {
-    throw new Error('rootDir must be a non-empty string');
+    throw ToolError.invalidParams({ field: 'rootDir', message: 'rootDir must be a non-empty string' });
   }
 
   const mustExist = options.mustExist !== false;

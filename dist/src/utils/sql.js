@@ -2,13 +2,14 @@
 "use strict";
 // @ts-nocheck
 Object.defineProperty(exports, "__esModule", { value: true });
+const ToolError = require('../errors/ToolError');
 function normalizeIdentifierPart(value) {
     const trimmed = String(value ?? '').trim();
     if (!trimmed) {
-        throw new Error('Identifier must be a non-empty string');
+        throw ToolError.invalidParams({ field: 'identifier', message: 'Identifier must be a non-empty string' });
     }
     if (trimmed.includes('\0')) {
-        throw new Error('Identifier must not contain null bytes');
+        throw ToolError.invalidParams({ field: 'identifier', message: 'Identifier must not contain null bytes' });
     }
     const unquoted = trimmed.startsWith('"') && trimmed.endsWith('"')
         ? trimmed.slice(1, -1)
@@ -18,13 +19,13 @@ function normalizeIdentifierPart(value) {
 function quoteQualifiedIdentifier(identifier) {
     const parts = String(identifier ?? '').split('.');
     if (parts.length === 0) {
-        throw new Error('Identifier must be a non-empty string');
+        throw ToolError.invalidParams({ field: 'identifier', message: 'Identifier must be a non-empty string' });
     }
     return parts.map(normalizeIdentifierPart).join('.');
 }
 function normalizeTableContext(tableName, schemaName) {
     if (!tableName) {
-        throw new Error('Table name is required');
+        throw ToolError.invalidParams({ field: 'table', message: 'Table name is required' });
     }
     if (schemaName) {
         const schema = String(schemaName);
@@ -65,7 +66,7 @@ function buildFiltersClause(filters, startIndex = 1) {
         }
         if (operator === 'IN' || operator === 'NOT IN') {
             if (!Array.isArray(value) || value.length === 0) {
-                throw new Error(`${operator} filter requires a non-empty array`);
+                throw ToolError.invalidParams({ field: 'filters', message: `${operator} filter requires a non-empty array` });
             }
             const placeholders = value.map((entry) => addValue(entry)).join(', ');
             clauses.push(`${columnSql} ${operator} (${placeholders})`);
@@ -77,7 +78,7 @@ function buildFiltersClause(filters, startIndex = 1) {
     if (Array.isArray(filters)) {
         for (const item of filters) {
             if (!item || typeof item !== 'object') {
-                throw new Error('Filter item must be an object');
+                throw ToolError.invalidParams({ field: 'filters', message: 'Filter item must be an object' });
             }
             pushFilter(item.column ?? item.field, item.op, item.value);
         }

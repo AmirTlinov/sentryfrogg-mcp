@@ -1,6 +1,6 @@
 {
   "name": "sentryfrogg-mcp",
-  "version": "6.4.0",
+  "version": "7.0.1",
   "description": "Enterprise MCP server for PostgreSQL, SSH and HTTP operations under the SentryFrogg brand",
   "main": "dist/sentryfrogg_server.js",
   "type": "commonjs",

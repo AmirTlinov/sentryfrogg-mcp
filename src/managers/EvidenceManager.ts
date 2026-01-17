@@ -5,6 +5,10 @@
  * 🧾 Evidence Manager
  */
 
+const { unknownActionError } = require('../utils/toolErrors');
+
+const EVIDENCE_ACTIONS = ['list', 'get'];
+
 class EvidenceManager {
   constructor(logger, security, validation, evidenceService) {
     this.logger = logger.child('evidence');
@@ -21,7 +25,7 @@ class EvidenceManager {
       case 'get':
         return this.get(args);
       default:
-        throw new Error(`Unknown evidence action: ${action}`);
+        throw unknownActionError({ tool: 'evidence', action, knownActions: EVIDENCE_ACTIONS });
     }
   }
 

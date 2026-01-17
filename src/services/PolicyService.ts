@@ -24,7 +24,7 @@ const DAY_INDEX = {
 
 function ensureObject(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
+    throw ToolError.invalidParams({ field: label, message: `${label} must be an object` });
   }
   return value;
 }
@@ -36,12 +36,15 @@ function ensureOptionalObject(value, label) {
   return ensureObject(value, label);
 }
 
-function normalizeStringArray(value) {
+function normalizeStringArray(value, label) {
   if (value === undefined || value === null) {
     return null;
   }
   if (!Array.isArray(value)) {
-    throw new Error('must be an array of strings');
+    throw ToolError.invalidParams({
+      field: label || 'value',
+      message: 'must be an array of strings',
+    });
   }
   const items = value
     .map((entry) => (entry === undefined || entry === null ? '' : String(entry).trim()))
@@ -75,25 +78,25 @@ function parseTimeMinutes(raw, label) {
   }
   const match = value.match(/^(\d{1,2}):(\d{2})$/);
   if (!match) {
-    throw new Error(`${label} must be HH:MM (24h)`);
+    throw ToolError.invalidParams({ field: label, message: `${label} must be HH:MM (24h)` });
   }
   const hours = Number(match[1]);
   const minutes = Number(match[2]);
   if (!Number.isInteger(hours) || hours < 0 || hours > 23) {
-    throw new Error(`${label} hours must be 0-23`);
+    throw ToolError.invalidParams({ field: label, message: `${label} hours must be 0-23` });
   }
   if (!Number.isInteger(minutes) || minutes < 0 || minutes > 59) {
-    throw new Error(`${label} minutes must be 0-59`);
+    throw ToolError.invalidParams({ field: label, message: `${label} minutes must be 0-59` });
   }
   return hours * 60 + minutes;
 }
 
-function normalizeDays(value) {
+function normalizeDays(value, label) {
   if (value === undefined || value === null) {
     return null;
   }
   if (!Array.isArray(value)) {
-    throw new Error('days must be an array');
+    throw ToolError.invalidParams({ field: label || 'days', message: 'days must be an array' });
   }
   const days = new Set();
   for (const raw of value) {
@@ -103,7 +106,7 @@ function normalizeDays(value) {
     const normalized = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
     if (typeof normalized === 'number') {
       if (!Number.isInteger(normalized) || normalized < 0 || normalized > 6) {
-        throw new Error('days entries must be 0-6');
+        throw ToolError.invalidParams({ field: label || 'days', message: 'days entries must be 0-6' });
       }
       days.add(normalized);
       continue;
@@ -111,12 +114,12 @@ function normalizeDays(value) {
     if (typeof normalized === 'string') {
       const idx = DAY_INDEX[normalized.slice(0, 3)];
       if (idx === undefined) {
-        throw new Error(`Unknown day: ${raw}`);
+        throw ToolError.invalidParams({ field: label || 'days', message: `Unknown day: ${raw}` });
       }
       days.add(idx);
       continue;
     }
-    throw new Error('days entries must be strings or numbers');
+    throw ToolError.invalidParams({ field: label || 'days', message: 'days entries must be strings or numbers' });
   }
   return days.size > 0 ? Array.from(days) : null;
 }
@@ -126,19 +129,23 @@ function normalizeChangeWindows(raw) {
     return null;
   }
   if (!Array.isArray(raw)) {
-    throw new Error('change_windows must be an array');
+    throw ToolError.invalidParams({ field: 'policy.change_windows', message: 'change_windows must be an array' });
   }
   const windows = [];
   for (const entry of raw) {
     const window = ensureObject(entry, 'change_windows entry');
     const start = parseTimeMinutes(window.start, 'change_windows.start');
     const end = parseTimeMinutes(window.end, 'change_windows.end');
-    const days = normalizeDays(window.days);
+    const days = normalizeDays(window.days, 'change_windows.days');
     const tz = window.tz === undefined || window.tz === null || window.tz === ''
       ? 'UTC'
       : String(window.tz).trim();
     if (tz !== 'UTC') {
-      throw new Error('change_windows.tz currently only supports UTC');
+      throw ToolError.invalidParams({
+        field: 'change_windows.tz',
+        message: 'change_windows.tz currently only supports UTC',
+        hint: 'Omit tz or set tz=\"UTC\".',
+      });
     }
     windows.push({
       days,
@@ -265,12 +272,17 @@ class PolicyService {
     if (typeof value === 'string') {
       const profile = this.resolvePolicyProfile(value, projectContext);
       if (!profile) {
-        throw new Error(`${label} profile '${value}' not found`);
+        throw ToolError.notFound({
+          code: 'POLICY_PROFILE_NOT_FOUND',
+          message: `${label} profile '${value}' not found`,
+          hint: 'Use a known project.policy_profiles key, or pass the policy object directly.',
+          details: { profile: value },
+        });
       }
       return profile;
     }
     if (typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error(`${label} must be an object or profile name`);
+      throw ToolError.invalidParams({ field: label, message: `${label} must be an object or profile name` });
     }
     return value;
   }
@@ -282,21 +294,21 @@ class PolicyService {
       ? null
       : String(payload.mode).trim();
 
-    const allowIntents = normalizeStringArray(payload.allow?.intents);
+    const allowIntents = normalizeStringArray(payload.allow?.intents, 'policy.allow.intents');
     const allowMerge = payload.allow?.merge;
     if (allowMerge !== undefined && typeof allowMerge !== 'boolean') {
-      throw new Error('policy.allow.merge must be a boolean');
+      throw ToolError.invalidParams({ field: 'policy.allow.merge', message: 'policy.allow.merge must be a boolean' });
     }
 
-    const allowedRemotes = normalizeStringArray(payload.repo?.allowed_remotes);
-    const allowedNamespaces = normalizeStringArray(payload.kubernetes?.allowed_namespaces);
+    const allowedRemotes = normalizeStringArray(payload.repo?.allowed_remotes, 'policy.repo.allowed_remotes');
+    const allowedNamespaces = normalizeStringArray(payload.kubernetes?.allowed_namespaces, 'policy.kubernetes.allowed_namespaces');
 
     const changeWindows = normalizeChangeWindows(payload.change_windows);
 
     const lockRaw = payload.lock === undefined || payload.lock === null ? null : ensureOptionalObject(payload.lock, 'policy.lock');
     const lockEnabled = lockRaw?.enabled === undefined ? true : lockRaw.enabled;
     if (lockEnabled !== undefined && typeof lockEnabled !== 'boolean') {
-      throw new Error('policy.lock.enabled must be a boolean');
+      throw ToolError.invalidParams({ field: 'policy.lock.enabled', message: 'policy.lock.enabled must be a boolean' });
     }
 
     const ttlMsRaw = lockRaw?.ttl_ms;
@@ -305,7 +317,7 @@ class PolicyService {
       : Number(ttlMsRaw);
 
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-      throw new Error('policy.lock.ttl_ms must be a positive number');
+      throw ToolError.invalidParams({ field: 'policy.lock.ttl_ms', message: 'policy.lock.ttl_ms must be a positive number' });
     }
 
     return {
@@ -487,7 +499,11 @@ class PolicyService {
 
   async acquireLock({ key, traceId, ttlMs, meta }) {
     if (!this.stateService) {
-      throw new Error('state service is not available for lock enforcement');
+      throw ToolError.internal({
+        code: 'STATE_SERVICE_UNAVAILABLE',
+        message: 'state service is not available for lock enforcement',
+        hint: 'This is a server configuration error. Enable StateService in bootstrap.',
+      });
     }
 
     const now = Date.now();

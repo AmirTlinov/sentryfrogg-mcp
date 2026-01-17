@@ -42,7 +42,12 @@ test('Audit log redacts sensitive fields', async () => {
     assert.equal(entry.input.auth_token, '[REDACTED]');
     assert.equal(entry.input.headers.Authorization, '[REDACTED]');
     assert.ok(entry.input.body_base64.startsWith('[base64:'));
-    process.env.MCP_AUDIT_PATH = original;
+    if (original === undefined) {
+        delete process.env.MCP_AUDIT_PATH;
+    }
+    else {
+        process.env.MCP_AUDIT_PATH = original;
+    }
     await fs.rm(dir, { recursive: true, force: true });
 });
 test('Audit log redacts env maps and summaries stdin/content payloads', async () => {
@@ -79,7 +84,12 @@ test('Audit log redacts env maps and summaries stdin/content payloads', async ()
     assert.ok(String(entries[1].input.patch).startsWith('[patch:'));
     assert.ok(String(entries[1].input.stdin).startsWith('[stdin:'));
     assert.ok(String(entries[1].input.content_base64).startsWith('[base64:'));
-    process.env.MCP_AUDIT_PATH = original;
+    if (original === undefined) {
+        delete process.env.MCP_AUDIT_PATH;
+    }
+    else {
+        process.env.MCP_AUDIT_PATH = original;
+    }
     await fs.rm(dir, { recursive: true, force: true });
 });
 test('AuditService streams entries with reverse/offset/filters', async () => {
@@ -124,6 +134,11 @@ test('AuditService streams entries with reverse/offset/filters', async () => {
     assert.deepEqual(filteredStatus.entries.map((entry) => entry.trace_id), ['t2']);
     const filteredSince = await auditService.readEntries({ limit: 10, offset: 0, filters: { since: '2025-01-02T12:00:00.000Z' } });
     assert.deepEqual(filteredSince.entries.map((entry) => entry.trace_id), ['t3']);
-    process.env.MCP_AUDIT_PATH = original;
+    if (original === undefined) {
+        delete process.env.MCP_AUDIT_PATH;
+    }
+    else {
+        process.env.MCP_AUDIT_PATH = original;
+    }
     await fs.rm(dir, { recursive: true, force: true });
 });

@@ -8,6 +8,7 @@
 const fs = require('fs/promises');
 const { resolvePresetsPath } = require('../utils/paths');
 const { atomicWriteTextFile } = require('../utils/fsAtomic');
+const ToolError = require('../errors/ToolError');
 
 class PresetService {
   constructor(logger) {
@@ -19,6 +20,7 @@ class PresetService {
       saved: 0,
       created: 0,
       updated: 0,
+      errors: 0,
     };
     this.initPromise = this.load();
   }
@@ -47,6 +49,7 @@ class PresetService {
       this.stats.loaded = count;
     } catch (error) {
       if (error.code !== 'ENOENT') {
+        this.stats.errors += 1;
         this.logger.warn('Failed to load presets file', { error: error.message });
       }
     }
@@ -67,18 +70,18 @@ class PresetService {
 
   normalizeTool(tool) {
     if (!tool || typeof tool !== 'string') {
-      throw new Error('tool must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'tool', message: 'tool must be a non-empty string' });
     }
     const trimmed = tool.trim();
     if (!trimmed) {
-      throw new Error('tool must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'tool', message: 'tool must be a non-empty string' });
     }
     return trimmed;
   }
 
   validatePreset(preset) {
     if (!preset || typeof preset !== 'object' || Array.isArray(preset)) {
-      throw new Error('preset must be an object');
+      throw ToolError.invalidParams({ field: 'preset', message: 'preset must be an object' });
     }
   }
 
@@ -96,7 +99,7 @@ class PresetService {
     await this.ensureReady();
     const normalizedTool = this.normalizeTool(tool);
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('preset name must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'name', message: 'preset name must be a non-empty string' });
     }
     this.validatePreset(preset);
 
@@ -126,13 +129,18 @@ class PresetService {
     await this.ensureReady();
     const normalizedTool = this.normalizeTool(tool);
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('preset name must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'name', message: 'preset name must be a non-empty string' });
     }
 
     const bucket = this.presets.get(normalizedTool);
     const trimmedName = name.trim();
     if (!bucket || !bucket.has(trimmedName)) {
-      throw new Error(`preset '${trimmedName}' not found for tool '${normalizedTool}'`);
+      throw ToolError.notFound({
+        code: 'PRESET_NOT_FOUND',
+        message: `preset '${trimmedName}' not found for tool '${normalizedTool}'`,
+        hint: 'Use action=preset_list to see known presets.',
+        details: { tool: normalizedTool, name: trimmedName },
+      });
     }
 
     return { success: true, preset: { tool: normalizedTool, name: trimmedName, ...bucket.get(trimmedName) } };
@@ -174,13 +182,18 @@ class PresetService {
     await this.ensureReady();
     const normalizedTool = this.normalizeTool(tool);
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('preset name must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'name', message: 'preset name must be a non-empty string' });
     }
 
     const bucket = this.presets.get(normalizedTool);
     const trimmedName = name.trim();
     if (!bucket || !bucket.delete(trimmedName)) {
-      throw new Error(`preset '${trimmedName}' not found for tool '${normalizedTool}'`);
+      throw ToolError.notFound({
+        code: 'PRESET_NOT_FOUND',
+        message: `preset '${trimmedName}' not found for tool '${normalizedTool}'`,
+        hint: 'Use action=preset_list to see known presets.',
+        details: { tool: normalizedTool, name: trimmedName },
+      });
     }
 
     await this.persist();

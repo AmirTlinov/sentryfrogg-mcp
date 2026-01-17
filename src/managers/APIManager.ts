@@ -15,8 +15,13 @@ const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const http = require('node:http');
+const https = require('node:https');
 const { getPathValue } = require('../utils/dataPath');
 const { isTruthy } = require('../utils/featureFlags');
+const { redactText } = require('../utils/redact');
+const { unknownActionError } = require('../utils/toolErrors');
+const ToolError = require('../errors/ToolError');
 const {
   resolveContextRepoRoot,
   buildToolCallFileRef,
@@ -28,6 +33,17 @@ const { expandHomePath } = require('../utils/userPaths');
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
+const API_ACTIONS = [
+  'profile_upsert',
+  'profile_get',
+  'profile_list',
+  'profile_delete',
+  'request',
+  'paginate',
+  'download',
+  'check',
+  'smoke_http',
+];
 
 let fetchPromise = null;
 async function fetchFn(...args) {
@@ -285,8 +301,10 @@ class APIManager {
         return this.download(args);
       case 'check':
         return this.checkApi(args);
+      case 'smoke_http':
+        return this.smokeHttp(args);
       default:
-        throw new Error(`Unknown API action: ${action}`);
+        throw unknownActionError({ tool: 'api', action, knownActions: API_ACTIONS });
     }
   }
 
@@ -359,7 +377,7 @@ class APIManager {
       return { dataProvider: undefined, secrets: {} };
     }
     if (typeof provider !== 'object' || Array.isArray(provider)) {
-      throw new Error('auth_provider must be an object');
+      throw ToolError.invalidParams({ field: 'auth_provider', message: 'auth_provider must be an object' });
     }
 
     const dataProvider = { ...provider };
@@ -515,7 +533,11 @@ class APIManager {
       const execConfig = provider.exec ? provider.exec : provider;
       const command = execConfig.command;
       if (!command) {
-        throw new Error('auth_provider.exec.command is required');
+        throw ToolError.invalidParams({
+          field: 'auth_provider.exec.command',
+          message: 'auth_provider.exec.command is required',
+          hint: 'Provide a command that prints a token to stdout (or JSON with token_path).',
+        });
       }
       const args = Array.isArray(execConfig.args) ? execConfig.args : [];
       const options = {
@@ -535,7 +557,11 @@ class APIManager {
       }
 
       if (!token) {
-        throw new Error('auth_provider.exec did not return a token');
+        throw ToolError.invalidParams({
+          field: 'auth_provider.exec',
+          message: 'auth_provider.exec did not return a token',
+          hint: 'Ensure the exec command prints the token (or JSON at token_path) to stdout.',
+        });
       }
 
       return this.authFromToken(execConfig, token);
@@ -547,7 +573,11 @@ class APIManager {
       const clientSecret = provider.client_secret;
 
       if (!tokenUrl || !clientId || !clientSecret) {
-        throw new Error('auth_provider.oauth2 requires token_url, client_id, client_secret');
+        throw ToolError.invalidParams({
+          field: 'auth_provider',
+          message: 'auth_provider.oauth2 requires token_url, client_id, client_secret',
+          hint: 'Provide token_url/client_id/client_secret (secrets may be stored in profile secrets).',
+        });
       }
 
       const cacheKey = this.cacheKey(provider, profileName);
@@ -571,7 +601,10 @@ class APIManager {
       if (grantType === 'refresh_token') {
         const refreshToken = provider.refresh_token;
         if (!refreshToken) {
-          throw new Error('auth_provider.oauth2.refresh_token is required for refresh_token grant');
+          throw ToolError.invalidParams({
+            field: 'auth_provider.refresh_token',
+            message: 'auth_provider.oauth2.refresh_token is required for refresh_token grant',
+          });
         }
         payload.set('refresh_token', refreshToken);
       }
@@ -592,7 +625,31 @@ class APIManager {
 
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`OAuth2 token request failed (${response.status}): ${text}`);
+        const redacted = redactText(String(text || ''), { maxString: 16 * 1024 });
+        let error;
+        if (response.status === 401 || response.status === 403) {
+          error = ToolError.denied({
+            code: 'OAUTH2_DENIED',
+            message: `OAuth2 token request failed (${response.status})`,
+            hint: 'Check client credentials and token_url permissions.',
+            details: { status: response.status, body: redacted },
+          });
+        } else if (response.status === 429 || response.status >= 500) {
+          error = ToolError.retryable({
+            code: 'OAUTH2_RETRYABLE',
+            message: `OAuth2 token request failed (${response.status})`,
+            hint: 'Retry later or increase timeout/retries.',
+            details: { status: response.status, body: redacted },
+          });
+        } else {
+          error = ToolError.invalidParams({
+            field: 'auth_provider',
+            message: `OAuth2 token request failed (${response.status})`,
+            hint: 'Check token_url/client_id/client_secret and grant_type/scope/audience.',
+            details: { status: response.status, body: redacted },
+          });
+        }
+        throw error;
       }
 
       const tokenPayload = await response.json();
@@ -677,7 +734,7 @@ class APIManager {
 
   buildHeaders(baseHeaders, authHeaders) {
     return {
-      'User-Agent': 'sentryfrogg-api-client/6.4.0',
+      'User-Agent': 'sentryfrogg-api-client/7.0.1',
       Accept: 'application/json, text/plain, */*',
       ...baseHeaders,
       ...authHeaders,
@@ -718,9 +775,21 @@ class APIManager {
     let url = explicitUrl;
     if (!url) {
       if (!baseUrl) {
-        throw new Error('base_url or url must be provided');
+        throw ToolError.invalidParams({
+          field: 'base_url',
+          message: 'base_url or url must be provided',
+          hint: 'Provide args.url for absolute URL, or configure profile.data.base_url and use args.path.',
+        });
       }
-      url = path ? new URL(path, baseUrl).toString() : baseUrl;
+      try {
+        url = path ? new URL(path, baseUrl).toString() : baseUrl;
+      } catch (error) {
+        throw ToolError.invalidParams({
+          field: 'path',
+          message: 'Invalid URL/path',
+          hint: 'Provide a valid base_url and relative path, or pass a full url.',
+        });
+      }
     }
 
     const parsed = this.security.ensureUrl(url);
@@ -1216,7 +1285,23 @@ class APIManager {
       return lastResponse;
     }
 
-    throw lastError || new Error('Request failed after retries');
+    if (ToolError.isToolError(lastError)) {
+      throw lastError;
+    }
+    const isAbort = lastError && (lastError.name === 'AbortError' || lastError.code === 'ABORT_ERR' || lastError.message === 'timeout');
+    if (isAbort) {
+      throw ToolError.timeout({
+        code: 'HTTP_TIMEOUT',
+        message: 'Request timed out',
+        hint: 'Increase timeout_ms, or reduce response size.',
+      });
+    }
+    throw ToolError.retryable({
+      code: 'HTTP_RETRY_EXHAUSTED',
+      message: 'Request failed after retries',
+      hint: 'Check network/endpoint, or increase retry.max_attempts.',
+      details: { last_error: lastError?.message || String(lastError || '') },
+    });
   }
 
   async requestWithRetry(args, profile, auth) {
@@ -1260,7 +1345,23 @@ class APIManager {
       return lastResponse;
     }
 
-    throw lastError || new Error('Request failed after retries');
+    if (ToolError.isToolError(lastError)) {
+      throw lastError;
+    }
+    const isAbort = lastError && (lastError.name === 'AbortError' || lastError.code === 'ABORT_ERR' || lastError.message === 'timeout');
+    if (isAbort) {
+      throw ToolError.timeout({
+        code: 'HTTP_TIMEOUT',
+        message: 'Request timed out',
+        hint: 'Increase timeout_ms, or reduce response size.',
+      });
+    }
+    throw ToolError.retryable({
+      code: 'HTTP_RETRY_EXHAUSTED',
+      message: 'Request failed after retries',
+      hint: 'Check network/endpoint, or increase retry.max_attempts.',
+      details: { last_error: lastError?.message || String(lastError || '') },
+    });
   }
 
   normalizePagination(requestPagination, profilePagination) {
@@ -1269,7 +1370,7 @@ class APIManager {
       ...(requestPagination || {}),
     };
     if (!merged || !merged.type) {
-      throw new Error('pagination.type is required');
+      throw ToolError.invalidParams({ field: 'pagination.type', message: 'pagination.type is required' });
     }
 
     return {
@@ -1402,7 +1503,11 @@ class APIManager {
         offset += pagination.size;
       } else if (pagination.type === 'cursor') {
         if (!pagination.cursor_path) {
-          throw new Error('pagination.cursor_path is required for cursor pagination');
+          throw ToolError.invalidParams({
+            field: 'pagination.cursor_path',
+            message: 'pagination.cursor_path is required for cursor pagination',
+            hint: 'Provide pagination.cursor_path (JSON path to next cursor), or use pagination.type=page/offset/link.',
+          });
         }
         const nextCursor = getPathValue(response, pagination.cursor_path, { defaultValue: null });
         if (!nextCursor) {
@@ -1435,12 +1540,21 @@ class APIManager {
     const config = this.buildRequestConfig(args, profile, auth);
     const filePath = expandHomePath(args.download_path || args.file_path);
     if (!filePath) {
-      throw new Error('download_path is required');
+      throw ToolError.invalidParams({
+        field: 'download_path',
+        message: 'download_path is required',
+        hint: 'Provide args.download_path (or args.file_path) as a local filesystem path.',
+      });
     }
 
     const overwrite = args.overwrite === true;
     if (!overwrite && await pathExists(filePath)) {
-      throw new Error(`Local path already exists: ${filePath}`);
+      throw ToolError.conflict({
+        code: 'LOCAL_PATH_EXISTS',
+        message: `Local path already exists: ${filePath}`,
+        hint: 'Set overwrite=true to replace it.',
+        details: { path: filePath },
+      });
     }
 
     const controller = new AbortController();
@@ -1544,7 +1658,23 @@ class APIManager {
       return lastResponse;
     }
 
-    throw lastError || new Error('Download failed after retries');
+    if (ToolError.isToolError(lastError)) {
+      throw lastError;
+    }
+    const isAbort = lastError && (lastError.name === 'AbortError' || lastError.code === 'ABORT_ERR' || lastError.message === 'timeout');
+    if (isAbort) {
+      throw ToolError.timeout({
+        code: 'HTTP_TIMEOUT',
+        message: 'Download timed out',
+        hint: 'Increase timeout_ms, or reduce response size.',
+      });
+    }
+    throw ToolError.retryable({
+      code: 'HTTP_RETRY_EXHAUSTED',
+      message: 'Download failed after retries',
+      hint: 'Check network/endpoint, or increase retry.max_attempts.',
+      details: { last_error: lastError?.message || String(lastError || '') },
+    });
   }
 
   async checkApi(args = {}) {
@@ -1563,6 +1693,206 @@ class APIManager {
         error: error.message,
       };
     }
+  }
+
+  async smokeHttp(args = {}) {
+    const rawUrl = this.validation.ensureString(args.url, 'url');
+    const expectCode = Number.isFinite(Number(args.expect_code)) ? Math.floor(Number(args.expect_code)) : 200;
+    const followRedirects = args.follow_redirects !== false;
+    const insecureOk = args.insecure_ok !== false;
+    const maxBytes = Math.min(readPositiveInt(args.max_bytes) ?? 32 * 1024, 256 * 1024);
+    const timeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 10000, 120000);
+
+    const started = Date.now();
+
+    let url;
+    try {
+      const parsed = this.security?.ensureUrl ? this.security.ensureUrl(rawUrl) : new URL(rawUrl);
+      if (parsed.username || parsed.password) {
+        throw ToolError.invalidParams({ field: 'url', message: 'URL must not include credentials' });
+      }
+      url = parsed.toString();
+    } catch (error) {
+      return {
+        success: false,
+        url: rawUrl,
+        expect_code: expectCode,
+        error: error?.message || String(error),
+        duration_ms: Date.now() - started,
+      };
+    }
+
+    const MAX_REDIRECTS = 10;
+    const captureLimit = Math.min(maxBytes + 1, 256 * 1024 + 1);
+
+    const requestOnce = (targetUrl, remainingMs) => new Promise((resolve, reject) => {
+      const parsed = new URL(targetUrl);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        reject(new Error(`Unsupported URL protocol: ${parsed.protocol}`));
+        return;
+      }
+
+      const isHttps = parsed.protocol === 'https:';
+      const lib = isHttps ? https : http;
+      const headers = {
+        accept: '*/*',
+        'accept-encoding': 'identity',
+        connection: 'close',
+      };
+
+      const req = lib.request(parsed, {
+        method: 'GET',
+        headers,
+        ...(isHttps && insecureOk ? { rejectUnauthorized: false } : {}),
+      }, (res) => {
+        const status = Number.isFinite(res.statusCode) ? res.statusCode : 0;
+        const location = Array.isArray(res.headers?.location)
+          ? res.headers.location[0]
+          : res.headers?.location;
+
+        const chunks = [];
+        let captured = 0;
+        let bytes = 0;
+        let truncated = false;
+        let settled = false;
+
+        const finalize = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          const buffer = captured ? Buffer.concat(chunks, captured) : Buffer.alloc(0);
+          resolve({
+            status,
+            location: location ? String(location) : null,
+            bytes,
+            buffer,
+            truncated,
+          });
+        };
+
+        res.on('data', (chunk) => {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? '');
+          bytes += buf.length;
+          if (captured < captureLimit) {
+            const remaining = captureLimit - captured;
+            if (buf.length <= remaining) {
+              chunks.push(buf);
+              captured += buf.length;
+            } else {
+              chunks.push(buf.subarray(0, remaining));
+              captured += remaining;
+              truncated = true;
+              res.destroy();
+            }
+          } else {
+            truncated = true;
+            res.destroy();
+          }
+
+          if (captured >= captureLimit) {
+            truncated = true;
+            res.destroy();
+          }
+        });
+
+        res.once('end', finalize);
+        res.once('close', finalize);
+      });
+
+      req.setTimeout(remainingMs, () => {
+        req.destroy(new Error('timeout'));
+      });
+
+      req.on('error', (err) => {
+        reject(err);
+      });
+
+      req.end();
+    });
+
+    let currentUrl = url;
+    let finalUrl = currentUrl;
+    let redirected = false;
+    let status = 0;
+    let bytes = 0;
+    let captured = Buffer.alloc(0);
+    let truncated = false;
+
+    try {
+      for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+        const remainingMs = timeoutMs - (Date.now() - started);
+        if (remainingMs <= 0) {
+          throw ToolError.timeout({ code: 'HTTP_TIMEOUT', message: 'timeout' });
+        }
+
+        const result = await requestOnce(currentUrl, remainingMs);
+        status = result.status;
+        bytes = result.bytes;
+        captured = result.buffer;
+        truncated = result.truncated;
+        finalUrl = currentUrl;
+
+        const location = result.location;
+        const isRedirect = location && [301, 302, 303, 307, 308].includes(status);
+        if (followRedirects && isRedirect) {
+          if (hop >= MAX_REDIRECTS) {
+            throw ToolError.invalidParams({
+              field: 'follow_redirects',
+              message: `Too many redirects (>${MAX_REDIRECTS})`,
+              hint: 'Disable follow_redirects or fix the redirect chain.',
+            });
+          }
+          const next = new URL(location, currentUrl);
+          if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+            throw ToolError.invalidParams({
+              field: 'url',
+              message: `Redirected to unsupported protocol: ${next.protocol}`,
+            });
+          }
+          const ensured = this.security?.ensureUrl ? this.security.ensureUrl(next.toString()) : next;
+          if (ensured.username || ensured.password) {
+            throw ToolError.invalidParams({ field: 'url', message: 'Redirect URL must not include credentials' });
+          }
+          currentUrl = ensured.toString();
+          finalUrl = currentUrl;
+          redirected = true;
+          continue;
+        }
+
+        break;
+      }
+    } catch (error) {
+      return {
+        success: false,
+        url,
+        final_url: finalUrl,
+        expect_code: expectCode,
+        status,
+        error: error?.message || String(error),
+        duration_ms: Date.now() - started,
+      };
+    }
+
+    const previewBuffer = captured.length > maxBytes ? captured.subarray(0, maxBytes) : captured;
+    const outTruncated = truncated || captured.length > maxBytes;
+    const bodyText = redactText(previewBuffer.toString('utf8'), { maxString: Number.POSITIVE_INFINITY });
+    return {
+      success: true,
+      ok: status === expectCode,
+      url,
+      final_url: finalUrl,
+      redirected,
+      insecure_ok: insecureOk,
+      follow_redirects: followRedirects,
+      expect_code: expectCode,
+      status,
+      duration_ms: Date.now() - started,
+      bytes,
+      captured_bytes: previewBuffer.length,
+      truncated: outTruncated,
+      body_preview: bodyText,
+    };
   }
 
   getStats() {

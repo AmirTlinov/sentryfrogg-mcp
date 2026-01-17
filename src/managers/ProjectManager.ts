@@ -5,7 +5,18 @@
  * 🗂️ Project manager.
  */
 
+const { unknownActionError } = require('../utils/toolErrors');
+
 const ACTIVE_PROJECT_KEY = 'project.active';
+const PROJECT_ACTIONS = [
+  'project_upsert',
+  'project_get',
+  'project_list',
+  'project_delete',
+  'project_use',
+  'project_active',
+  'project_unuse',
+];
 
 class ProjectManager {
   constructor(logger, validation, projectService, stateService) {
@@ -34,7 +45,7 @@ class ProjectManager {
       case 'project_unuse':
         return this.projectUnuse(args.scope);
       default:
-        throw new Error(`Unknown project action: ${action}`);
+        throw unknownActionError({ tool: 'project', action, knownActions: PROJECT_ACTIONS });
     }
   }
 

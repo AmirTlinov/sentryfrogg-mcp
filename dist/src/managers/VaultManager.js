@@ -6,7 +6,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
  * 🧱 Vault manager: profiles + basic diagnostics.
  */
 const { isTruthy } = require('../utils/featureFlags');
+const { unknownActionError } = require('../utils/toolErrors');
+const ToolError = require('../errors/ToolError');
 const VAULT_PROFILE_TYPE = 'vault';
+const VAULT_ACTIONS = ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test'];
 class VaultManager {
     constructor(logger, validation, profileService, vaultClient) {
         this.logger = logger.child('vault');
@@ -28,7 +31,7 @@ class VaultManager {
             case 'profile_test':
                 return this.profileTest(args.profile_name, args);
             default:
-                throw new Error(`Unknown vault action: ${action}`);
+                throw unknownActionError({ tool: 'vault', action, knownActions: VAULT_ACTIONS });
         }
     }
     async profileUpsert(profileName, params = {}) {
@@ -48,17 +51,21 @@ class VaultManager {
         const secretIdValue = typeof secretId === 'string' && secretId.trim() ? secretId : null;
         const inferredAuth = authType || (tokenValue ? 'token' : (roleIdValue || secretIdValue ? 'approle' : 'none'));
         if (!['token', 'approle', 'none'].includes(inferredAuth)) {
-            throw new Error(`Unknown vault auth_type: ${String(inferredAuth)}`);
+            throw ToolError.invalidParams({
+                field: 'auth_type',
+                message: `Unknown vault auth_type: ${String(inferredAuth)}`,
+                hint: 'Supported: token, approle, none.',
+            });
         }
         if (inferredAuth === 'token' && !tokenValue) {
-            throw new Error('token is required for vault auth_type=token');
+            throw ToolError.invalidParams({ field: 'token', message: 'token is required for vault auth_type=token' });
         }
         if (inferredAuth === 'approle') {
             if (!roleIdValue) {
-                throw new Error('role_id is required for vault auth_type=approle');
+                throw ToolError.invalidParams({ field: 'role_id', message: 'role_id is required for vault auth_type=approle' });
             }
             if (!secretIdValue) {
-                throw new Error('secret_id is required for vault auth_type=approle');
+                throw ToolError.invalidParams({ field: 'secret_id', message: 'secret_id is required for vault auth_type=approle' });
             }
         }
         let previous = null;

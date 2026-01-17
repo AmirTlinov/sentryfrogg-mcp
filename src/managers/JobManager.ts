@@ -2,6 +2,18 @@
 // @ts-nocheck
 
 const ToolError = require('../errors/ToolError');
+const { unknownActionError } = require('../utils/toolErrors');
+
+const JOB_ACTIONS = [
+  'job_status',
+  'job_wait',
+  'job_logs_tail',
+  'tail_job',
+  'follow_job',
+  'job_cancel',
+  'job_forget',
+  'job_list',
+];
 
 function readPositiveInt(value) {
   if (value === undefined || value === null || value === '') {
@@ -68,6 +80,10 @@ class JobManager {
         return this.jobWait(args);
       case 'job_logs_tail':
         return this.jobLogsTail(args);
+      case 'tail_job':
+        return this.tailJob(args);
+      case 'follow_job':
+        return this.followJob(args);
       case 'job_cancel':
         return this.jobCancel(args);
       case 'job_forget':
@@ -75,11 +91,7 @@ class JobManager {
       case 'job_list':
         return this.jobList(args);
       default:
-        throw ToolError.invalidParams({
-          field: 'action',
-          message: `Unknown job action: ${action}`,
-          hint: 'Use one of: job_status, job_wait, job_logs_tail, job_cancel, job_forget, job_list.',
-        });
+        throw unknownActionError({ tool: 'job', action, knownActions: JOB_ACTIONS });
     }
   }
 
@@ -179,6 +191,81 @@ class JobManager {
     }
 
     return { success: false, code: 'NOT_SUPPORTED', job_id: jobId, kind: job.kind };
+  }
+
+  async tailJob(args = {}) {
+    const jobId = this.ensureJobId(args.job_id);
+    const job = this.jobService.get(jobId);
+    if (!job) {
+      return { success: false, code: 'NOT_FOUND', job_id: jobId };
+    }
+
+    const providerTool = job.provider?.tool;
+    if (providerTool === 'mcp_ssh_manager') {
+      if (!this.sshManager) {
+        throw ToolError.internal({ code: 'SSH_MANAGER_UNAVAILABLE', message: 'SSH manager is not available' });
+      }
+
+      const lines = Math.min(readPositiveInt(args.lines) ?? 120, 2000);
+      const budgetMs = readPositiveInt(process.env.SENTRYFROGG_TOOL_CALL_TIMEOUT_MS || process.env.SF_TOOL_CALL_TIMEOUT_MS) ?? 55_000;
+      const timeoutMs = Math.min(readPositiveInt(args.timeout_ms) ?? 10000, budgetMs);
+
+      const status = await this.sshManager.jobStatus({ ...args, job_id: jobId, timeout_ms: timeoutMs });
+      if (status?.success) {
+        const nextStatus = status.exited
+          ? (status.exit_code === 0 ? 'succeeded' : 'failed')
+          : 'running';
+        this.jobService.upsert({
+          job_id: jobId,
+          status: nextStatus,
+          started_at: job.started_at || job.created_at,
+          ended_at: status.exited ? (job.ended_at || nowIso()) : null,
+        });
+      }
+
+      const logs = await this.sshManager.jobLogsTail({ ...args, job_id: jobId, lines, timeout_ms: timeoutMs });
+      return {
+        success: Boolean(status?.success && logs?.success),
+        job: publicJobView(this.jobService.get(jobId)),
+        status,
+        logs,
+      };
+    }
+
+    return { success: false, code: 'NOT_SUPPORTED', job_id: jobId, kind: job.kind };
+  }
+
+  async followJob(args = {}) {
+    const jobId = this.ensureJobId(args.job_id);
+    const job = this.jobService.get(jobId);
+    if (!job) {
+      return { success: false, code: 'NOT_FOUND', job_id: jobId };
+    }
+
+    const wait = await this.jobWait({
+      ...args,
+      action: 'job_wait',
+      job_id: jobId,
+    });
+
+    const logs = await this.jobLogsTail({
+      ...args,
+      action: 'job_logs_tail',
+      job_id: jobId,
+      lines: args.lines,
+    });
+
+    const current = this.jobService.get(jobId);
+    const logsPayload = logs?.logs ?? logs;
+    const logsNotSupported = logsPayload && typeof logsPayload === 'object' && logsPayload.code === 'NOT_SUPPORTED';
+    const logsOk = logsPayload && typeof logsPayload === 'object' && logsPayload.success === true;
+    return {
+      success: Boolean(wait?.success && (logsOk || logsNotSupported)),
+      job: publicJobView(current || job),
+      wait: wait?.wait ?? wait,
+      status: wait?.status ?? wait?.wait?.status ?? null,
+      logs: logsPayload,
+    };
   }
 
   async jobCancel(args = {}) {

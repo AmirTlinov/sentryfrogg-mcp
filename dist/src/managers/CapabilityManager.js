@@ -7,17 +7,20 @@ Object.defineProperty(exports, "__esModule", { value: true });
  */
 const EFFECT_KINDS = new Set(['read', 'write', 'mixed']);
 const { matchesWhen } = require('../utils/whenMatcher');
+const { unknownActionError } = require('../utils/toolErrors');
+const ToolError = require('../errors/ToolError');
+const CAPABILITY_ACTIONS = ['list', 'get', 'set', 'delete', 'resolve', 'suggest', 'graph', 'stats'];
 function ensureStringArray(value, label) {
     if (value === undefined || value === null) {
         return [];
     }
     if (!Array.isArray(value)) {
-        throw new Error(`${label} must be an array`);
+        throw ToolError.invalidParams({ field: label, message: `${label} must be an array` });
     }
     const result = [];
     for (const entry of value) {
         if (typeof entry !== 'string' || entry.trim().length === 0) {
-            throw new Error(`${label} must contain non-empty strings`);
+            throw ToolError.invalidParams({ field: label, message: `${label} must contain non-empty strings` });
         }
         result.push(entry.trim());
     }
@@ -28,7 +31,7 @@ function ensureOptionalObject(value, label) {
         return undefined;
     }
     if (typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error(`${label} must be an object`);
+        throw ToolError.invalidParams({ field: label, message: `${label} must be an object` });
     }
     return value;
 }
@@ -50,7 +53,10 @@ function normalizeInputs(inputs) {
 function normalizeEffects(effects) {
     const kind = effects?.kind || 'read';
     if (!EFFECT_KINDS.has(kind)) {
-        throw new Error(`effects.kind must be one of: ${Array.from(EFFECT_KINDS).join(', ')}`);
+        throw ToolError.invalidParams({
+            field: 'effects.kind',
+            message: `effects.kind must be one of: ${Array.from(EFFECT_KINDS).join(', ')}`,
+        });
     }
     const requiresApply = effects?.requires_apply ?? (kind !== 'read');
     return { kind, requires_apply: Boolean(requiresApply) };
@@ -60,7 +66,7 @@ function normalizeWhen(when) {
         return undefined;
     }
     if (typeof when !== 'object' || Array.isArray(when)) {
-        throw new Error('Capability when must be an object');
+        throw ToolError.invalidParams({ field: 'when', message: 'Capability when must be an object' });
     }
     return when;
 }
@@ -92,7 +98,7 @@ class CapabilityManager {
             case 'stats':
                 return this.capabilityService.getStats();
             default:
-                throw new Error(`Unknown capability action: ${action}`);
+                throw unknownActionError({ tool: 'capability', action, knownActions: CAPABILITY_ACTIONS });
         }
     }
     async list() {
@@ -108,7 +114,12 @@ class CapabilityManager {
         const intent = this.validation.ensureString(args.intent, 'Intent type');
         const candidates = await this.capabilityService.findAllByIntent(intent);
         if (!candidates || candidates.length === 0) {
-            throw new Error(`Capability for intent '${intent}' not found`);
+            throw ToolError.notFound({
+                code: 'CAPABILITY_NOT_FOUND',
+                message: `Capability for intent '${intent}' not found`,
+                hint: 'Create a capability for this intent, or run capability_list to see available ones.',
+                details: { intent_type: intent },
+            });
         }
         const contextResult = this.contextService
             ? await this.contextService.getContext(args).catch(() => null)
@@ -123,7 +134,12 @@ class CapabilityManager {
             }
         }
         if (matched.length === 0) {
-            throw new Error(`No capability matched when-clause for intent '${intent}'`);
+            throw ToolError.notFound({
+                code: 'CAPABILITY_WHEN_NO_MATCH',
+                message: `No capability matched when-clause for intent '${intent}'`,
+                hint: 'Adjust capability.when, or provide more project context so when-matching can succeed.',
+                details: { intent_type: intent },
+            });
         }
         matched.sort((a, b) => {
             const aIsDirect = a.name === intent ? 0 : 1;
@@ -168,7 +184,11 @@ class CapabilityManager {
     }
     async suggest(args) {
         if (!this.contextService) {
-            throw new Error('Context service is not available');
+            throw ToolError.internal({
+                code: 'CONTEXT_SERVICE_UNAVAILABLE',
+                message: 'Context service is not available',
+                hint: 'This is a server configuration error. Enable ContextService in bootstrap.',
+            });
         }
         const contextResult = await this.contextService.getContext(args);
         const context = contextResult.context || {};

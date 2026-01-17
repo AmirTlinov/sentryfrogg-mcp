@@ -8,8 +8,11 @@
 const crypto = require('crypto');
 const path = require('path');
 const { isTruthy } = require('../utils/featureFlags');
+const { unknownActionError } = require('../utils/toolErrors');
+const ToolError = require('../errors/ToolError');
 
 const ENV_PROFILE_TYPE = 'env';
+const ENV_ACTIONS = ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'write_remote', 'run_remote'];
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -23,7 +26,7 @@ function normalizeStringMap(input, label, { allowNull = true } = {}) {
     return null;
   }
   if (!isPlainObject(input)) {
-    throw new Error(`${label} must be an object`);
+    throw ToolError.invalidParams({ field: label, message: `${label} must be an object` });
   }
 
   const out = {};
@@ -48,10 +51,10 @@ function normalizeStringMap(input, label, { allowNull = true } = {}) {
 function normalizeEnvKey(key) {
   const trimmed = String(key || '').trim();
   if (!trimmed) {
-    throw new Error('env var key must be a non-empty string');
+    throw ToolError.invalidParams({ field: 'env', message: 'env var key must be a non-empty string' });
   }
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
-    throw new Error(`Invalid env var key: ${trimmed}`);
+    throw ToolError.invalidParams({ field: 'env', message: `Invalid env var key: ${trimmed}` });
   }
   return trimmed;
 }
@@ -103,7 +106,7 @@ class EnvManager {
       case 'run_remote':
         return this.runRemote(args);
       default:
-        throw new Error(`Unknown env action: ${action}`);
+        throw unknownActionError({ tool: 'env', action, knownActions: ENV_ACTIONS });
     }
   }
 
@@ -160,9 +163,18 @@ class EnvManager {
       return profiles[0].name;
     }
     if (profiles.length === 0) {
-      throw new Error('env profile is required (no env profiles exist)');
+      throw ToolError.invalidParams({
+        field: 'profile_name',
+        message: 'env profile is required (no env profiles exist)',
+        hint: 'Create an env profile first (env.profile_upsert), or pass args.profile_name explicitly.',
+      });
     }
-    throw new Error('env profile is required when multiple env profiles exist');
+    throw ToolError.invalidParams({
+      field: 'profile_name',
+      message: 'env profile is required when multiple env profiles exist',
+      hint: 'Pass args.profile_name explicitly.',
+      details: { known_profiles: profiles.map((p) => p.name) },
+    });
   }
 
   async resolveSshProfileName(args) {
@@ -181,7 +193,11 @@ class EnvManager {
       return this.validation.ensureString(String(resolved.sshProfile), 'ssh_profile');
     }
 
-    throw new Error('ssh_profile_name is required (or configure project target.ssh_profile)');
+    throw ToolError.invalidParams({
+      field: 'ssh_profile_name',
+      message: 'ssh_profile_name is required (or configure project target.ssh_profile)',
+      hint: 'Pass args.ssh_profile_name explicitly, or set target.ssh_profile in the active project.',
+    });
   }
 
   async loadEnvBundle(envProfileName) {
@@ -294,7 +310,11 @@ class EnvManager {
         const cwd = this.validation.ensureString(String(projectDefaults.cwd), 'cwd', { trim: false });
         remotePath = path.posix.join(cwd, '.env');
       } else {
-        throw new Error('remote_path is required (or configure project target.env_path / target.cwd)');
+        throw ToolError.invalidParams({
+          field: 'remote_path',
+          message: 'remote_path is required (or configure project target.env_path / target.cwd)',
+          hint: 'Pass args.remote_path explicitly, or set target.env_path / target.cwd in the project target.',
+        });
       }
     }
 
@@ -337,7 +357,12 @@ class EnvManager {
       }
 
       if (exists && !overwrite) {
-        throw new Error(`Remote path already exists: ${remotePath}`);
+        throw ToolError.conflict({
+          code: 'REMOTE_PATH_EXISTS',
+          message: `Remote path already exists: ${remotePath}`,
+          hint: 'Set overwrite=true (optionally backup=true) to replace it.',
+          details: { remote_path: remotePath },
+        });
       }
 
       const tmpPath = `${remotePath}.tmp-${process.pid}-${Date.now()}-${randomToken()}`;

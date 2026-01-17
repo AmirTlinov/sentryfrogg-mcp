@@ -9,6 +9,18 @@ const crypto = require('crypto');
 const { resolveTemplates, resolveTemplateString } = require('../utils/template');
 const { getPathValue } = require('../utils/dataPath');
 const { parseRunbookDsl } = require('../utils/runbookDsl');
+const { unknownActionError } = require('../utils/toolErrors');
+const ToolError = require('../errors/ToolError');
+const RUNBOOK_ACTIONS = [
+    'runbook_upsert',
+    'runbook_upsert_dsl',
+    'runbook_get',
+    'runbook_list',
+    'runbook_delete',
+    'runbook_run',
+    'runbook_run_dsl',
+    'runbook_compile',
+];
 const MAX_RETRY_ATTEMPTS = 50;
 const MAX_RETRY_DELAY_MS = 60_000;
 const MAX_RETRY_TOTAL_DELAY_MS = 10 * 60_000;
@@ -61,7 +73,7 @@ class RunbookManager {
             case 'runbook_compile':
                 return { success: true, runbook: this.runbookCompile(args.dsl || args.text || '') };
             default:
-                throw new Error(`Unknown runbook action: ${action}`);
+                throw unknownActionError({ tool: 'runbook', action, knownActions: RUNBOOK_ACTIONS });
         }
     }
     async runbookUpsert(name, payload) {
@@ -101,10 +113,18 @@ class RunbookManager {
             runbookPayload = stored.runbook;
         }
         else {
-            throw new Error('runbook_run requires name or runbook');
+            throw ToolError.invalidParams({
+                field: 'name',
+                message: 'runbook_run requires name or runbook',
+                hint: 'Provide args.name (stored runbook) or args.runbook (inline runbook).',
+            });
         }
         if (!Array.isArray(runbookPayload.steps) || runbookPayload.steps.length === 0) {
-            throw new Error('runbook.steps must be a non-empty array');
+            throw ToolError.invalidParams({
+                field: 'runbook.steps',
+                message: 'runbook.steps must be a non-empty array',
+                hint: 'Provide at least one step: [{ tool: \"ssh\", args: { ... } }].',
+            });
         }
         const results = [];
         const context = await this.buildContext(input, {}, { traceId, spanId: runbookSpanId, parentSpanId: args.parent_span_id });
@@ -229,13 +249,20 @@ class RunbookManager {
     }
     async executeStep(step, stepKey, context, options) {
         if (!step || typeof step !== 'object') {
-            throw new Error('runbook step must be an object');
+            throw ToolError.invalidParams({ field: `runbook.steps.${stepKey}`, message: 'runbook step must be an object' });
         }
         if (!step.tool) {
-            throw new Error(`runbook step '${stepKey}' missing tool`);
+            throw ToolError.invalidParams({
+                field: `runbook.steps.${stepKey}.tool`,
+                message: `runbook step '${stepKey}' missing tool`,
+            });
         }
         if (step.tool === 'mcp_runbook') {
-            throw new Error('Nested runbook execution is not supported');
+            throw ToolError.denied({
+                code: 'RUNBOOK_NESTING_DISABLED',
+                message: 'Nested runbook execution is not supported',
+                hint: 'Flatten nested runbooks into a single runbook, or execute them separately.',
+            });
         }
         const shouldRun = this.evaluateWhen(step.when, context, options);
         if (!shouldRun) {
@@ -256,12 +283,19 @@ class RunbookManager {
         };
         if (step.foreach) {
             if (retryConfig) {
-                throw new Error(`runbook step '${stepKey}' cannot combine foreach with retry`);
+                throw ToolError.invalidParams({
+                    field: `runbook.steps.${stepKey}`,
+                    message: `runbook step '${stepKey}' cannot combine foreach with retry`,
+                    hint: 'Move retry inside foreach, or remove foreach/retry from this step.',
+                });
             }
             const foreachConfig = resolveTemplates(step.foreach, context, options);
             const items = foreachConfig.items;
             if (!Array.isArray(items)) {
-                throw new Error(`runbook step '${stepKey}' foreach.items must be an array`);
+                throw ToolError.invalidParams({
+                    field: `runbook.steps.${stepKey}.foreach.items`,
+                    message: `runbook step '${stepKey}' foreach.items must be an array`,
+                });
             }
             const results = [];
             const parallel = foreachConfig.parallel === true;
@@ -348,14 +382,22 @@ class RunbookManager {
                 }
                 if (nextDelay > 0) {
                     if (totalDelayMs + nextDelay > MAX_RETRY_TOTAL_DELAY_MS) {
-                        throw new Error(`retry budget exceeded (${MAX_RETRY_TOTAL_DELAY_MS}ms)`);
+                        throw ToolError.timeout({
+                            code: 'RUNBOOK_RETRY_BUDGET_EXCEEDED',
+                            message: `retry budget exceeded (${MAX_RETRY_TOTAL_DELAY_MS}ms)`,
+                            hint: 'Reduce retry delays/max_attempts, or increase the global retry budget.',
+                        });
                     }
                     totalDelayMs += nextDelay;
                     await sleep(nextDelay);
                 }
             }
             const message = lastError ? lastError.message : 'retry attempts exhausted';
-            throw new Error(`Retry failed after ${maxAttempts} attempts: ${message}`);
+            throw ToolError.retryable({
+                code: 'RUNBOOK_RETRY_FAILED',
+                message: `Retry failed after ${maxAttempts} attempts`,
+                hint: message ? `Last error: ${message}` : undefined,
+            });
         }
         const output = await this.toolExecutor.execute(step.tool, applyTrace(resolvedArgs));
         return {

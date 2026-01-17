@@ -90,6 +90,116 @@ test('JobManager supports list/cancel/forget for inprocess jobs', async () => {
   assert.equal(forgotten.removed, true);
 });
 
+test('JobManager tail_job combines status+logs for ssh jobs', async () => {
+  const service = new JobService(loggerStub);
+  const job = service.create({ kind: 'ssh_detached', provider: { tool: 'mcp_ssh_manager' } });
+  service.upsert({
+    job_id: job.job_id,
+    status: 'running',
+    provider: { tool: 'mcp_ssh_manager' },
+    pid: 4242,
+    log_path: '/tmp/sf-job-manager-tail-job.log',
+    pid_path: '/tmp/sf-job-manager-tail-job.log.pid',
+    exit_path: '/tmp/sf-job-manager-tail-job.log.exit',
+  });
+
+  const sshStub = {
+    async jobStatus(args) {
+      return {
+        success: true,
+        job_id: args.job_id,
+        running: false,
+        exited: true,
+        exit_code: 0,
+      };
+    },
+    async jobLogsTail(args) {
+      return {
+        success: true,
+        job_id: args.job_id,
+        lines: args.lines,
+        text: 'hello\n',
+      };
+    },
+  };
+
+  const manager = new JobManager(loggerStub, validationStub, service, { sshManager: sshStub });
+  const out = await manager.handleAction({ action: 'tail_job', job_id: job.job_id, lines: 5 });
+  assert.equal(out.success, true);
+  assert.equal(out.job.job_id, job.job_id);
+  assert.equal(out.job.status, 'succeeded');
+  assert.equal(out.status.exited, true);
+  assert.equal(out.logs.lines, 5);
+  assert.equal(out.logs.text, 'hello\n');
+});
+
+test('JobManager tail_job returns NOT_SUPPORTED for non-ssh providers', async () => {
+  const service = new JobService(loggerStub);
+  const job = service.create({ kind: 'other', provider: { tool: 'mcp_repo' } });
+
+  const manager = new JobManager(loggerStub, validationStub, service, {});
+  const out = await manager.handleAction({ action: 'tail_job', job_id: job.job_id, lines: 5 });
+  assert.equal(out.success, false);
+  assert.equal(out.code, 'NOT_SUPPORTED');
+});
+
+test('JobManager follow_job waits and tails logs for ssh jobs', async () => {
+  const service = new JobService(loggerStub);
+  const job = service.create({ kind: 'ssh_detached', provider: { tool: 'mcp_ssh_manager' } });
+  service.upsert({
+    job_id: job.job_id,
+    status: 'running',
+    provider: { tool: 'mcp_ssh_manager' },
+    pid: 4242,
+    log_path: '/tmp/sf-job-manager-follow-job.log',
+    pid_path: '/tmp/sf-job-manager-follow-job.log.pid',
+    exit_path: '/tmp/sf-job-manager-follow-job.log.exit',
+  });
+
+  const sshStub = {
+    async jobWait(args) {
+      return {
+        success: true,
+        completed: true,
+        timed_out: false,
+        waited_ms: 1,
+        timeout_ms: args.timeout_ms ?? 10,
+        poll_interval_ms: 1,
+        status: { success: true, job_id: args.job_id, exited: true, exit_code: 0 },
+      };
+    },
+    async jobLogsTail(args) {
+      return {
+        success: true,
+        job_id: args.job_id,
+        lines: args.lines,
+        text: 'hello\n',
+      };
+    },
+  };
+
+  const manager = new JobManager(loggerStub, validationStub, service, { sshManager: sshStub });
+  const out = await manager.handleAction({ action: 'follow_job', job_id: job.job_id, lines: 5, timeout_ms: 1000 });
+  assert.equal(out.success, true);
+  assert.equal(out.job.job_id, job.job_id);
+  assert.equal(out.job.status, 'succeeded');
+  assert.equal(out.wait.completed, true);
+  assert.equal(out.logs.lines, 5);
+  assert.equal(out.logs.text, 'hello\n');
+});
+
+test('JobManager follow_job succeeds for inprocess jobs (logs NOT_SUPPORTED)', async () => {
+  const service = new JobService(loggerStub);
+  const job = service.create({ kind: 'inprocess_task' });
+  service.upsert({ job_id: job.job_id, status: 'running' });
+
+  const manager = new JobManager(loggerStub, validationStub, service, {});
+  const out = await manager.handleAction({ action: 'follow_job', job_id: job.job_id, timeout_ms: 5, lines: 5 });
+  assert.equal(out.success, true);
+  assert.equal(out.job.job_id, job.job_id);
+  assert.equal(out.logs.code, 'NOT_SUPPORTED');
+});
+
 test('JobService persists jobs with file store (durable mode)', async (t) => {
   const profilesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sf-jobs-store-'));
 

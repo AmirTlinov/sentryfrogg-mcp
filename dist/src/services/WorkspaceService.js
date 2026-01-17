@@ -240,11 +240,25 @@ class WorkspaceService {
             limit: args.limit,
             include_call: args.include_call !== false,
         };
+        const signals = context.signals && typeof context.signals === 'object' ? context.signals : {};
+        const files = context.files && typeof context.files === 'object' ? context.files : {};
+        const signalsTrue = Object.entries(signals)
+            .filter(([, value]) => value)
+            .map(([key]) => key)
+            .sort();
+        const evidenceFiles = Object.entries(files)
+            .filter(([, value]) => value)
+            .map(([key]) => key)
+            .sort()
+            .slice(0, 80);
         const baseWorkspace = {
             context: {
                 key: context.key,
                 root: context.root,
                 tags: context.tags,
+                signals_true: signalsTrue,
+                evidence_files: evidenceFiles,
+                git_root: context.git?.root ?? null,
                 project_name: context.project_name,
                 target_name: context.target_name,
                 updated_at: context.updated_at,

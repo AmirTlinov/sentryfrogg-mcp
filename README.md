@@ -22,6 +22,13 @@ If you want your agent to move real data (API ↔ SFTP ↔ Postgres), run contro
 - Safe-by-default local writes (no overwrite unless `overwrite: true`).
 - Optional unsafe local mode for full agent autonomy (local exec + filesystem).
 
+## Agent-first DX (quality-of-life)
+- `help({ query })` supports keyword search across tools/actions/fields/aliases.
+- Typos get “did you mean” suggestions for tools, actions, and parameters.
+- Errors are typed and actionable (usually include a `hint` + minimal working example).
+- Safer defaults: secret redaction everywhere; “raw” secret export is opt-in and gated.
+- Long-running exec/SSH flows prefer explicit status/progress over “detached silence”.
+
 ## Use cases
 - Sync or backfill data between APIs, SFTP drops, and PostgreSQL.
 - Run controlled remote operations via SSH with auditability.
@@ -61,27 +68,33 @@ Export Postgres to SFTP:
    {
      "mcpServers": {
        "sentryfrogg": {
-        "command": "node",
-        "args": ["/absolute/path/to/dist/sentryfrogg_server.js"]
+          "command": "node",
+          "args": ["/absolute/path/to/dist/sentryfrogg_server.js"]
+        }
       }
     }
-  }
    ```
 
    More details: `mcp_config.md`.
 3. Start: `npm start`
-4. In your MCP client: call `help`, then `profile_upsert` for PostgreSQL/SSH
+4. In your MCP client: call `help` (try `help({ query: "ssh exec" })`), then `profile_upsert` for PostgreSQL/SSH
 
 ## Tools
 - `help`
+- `legend`
+- `mcp_workspace`
+- `mcp_jobs`
+- `mcp_artifacts`
 - `mcp_psql_manager`
 - `mcp_ssh_manager`
 - `mcp_api_client`
+- `mcp_repo`
 - `mcp_state`
 - `mcp_runbook`
 - `mcp_project`
 - `mcp_context`
-- `mcp_workspace`
+- `mcp_env`
+- `mcp_vault`
 - `mcp_capability`
 - `mcp_intent`
 - `mcp_evidence`
@@ -91,7 +104,7 @@ Export Postgres to SFTP:
 - `mcp_pipeline`
 - `mcp_local` (unsafe, opt-in)
 
-Short aliases are also available (`sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `workspace`, `pipeline`; plus `local` when unsafe mode is enabled).
+Short aliases are also available (e.g. `sql`/`psql`, `ssh`, `api`/`http`, `repo`, `job`, `artifacts`, `workspace`, `intent`, `pipeline`; plus `local` when unsafe mode is enabled).
 
 Reference + examples: `docs/tools.md`.
 

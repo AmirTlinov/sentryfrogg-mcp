@@ -9,7 +9,9 @@ const crypto = require('crypto');
 const path = require('node:path');
 const { applyOutputTransform } = require('../utils/output');
 const { mergeDeep } = require('../utils/merge');
-const { redactObject, isSensitiveKey } = require('../utils/redact');
+const { redactObject, redactText, isSensitiveKey } = require('../utils/redact');
+const { suggest } = require('../utils/suggest');
+const ToolError = require('../errors/ToolError');
 const { resolveContextRepoRoot, buildToolCallFileRef, writeTextArtifact, writeBinaryArtifact, } = require('../utils/artifacts');
 const DEFAULT_MAX_INLINE_BYTES = 16 * 1024;
 const DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024;
@@ -119,15 +121,18 @@ async function spillLargeValues(value, options, pathSegments = [], state = null)
     if (typeof value === 'string') {
         const bytes = Buffer.byteLength(value, 'utf8');
         if (bytes <= maxInlineBytes) {
-            return value;
+            return redactText(value, { maxString: Number.POSITIVE_INFINITY });
         }
         const hasSensitiveKey = pathSegments.some((segment) => isSensitiveKey(segment));
         const previewLimit = Math.min(2048, Math.max(128, Math.floor(maxInlineBytes / 4)));
-        const { preview, tail } = buildPreviewTailText(value, previewLimit);
-        const capped = truncateUtf8Prefix(value, maxCaptureBytes);
+        const previewParts = buildPreviewTailText(value, previewLimit);
+        const preview = redactText(previewParts.preview, { maxString: Number.POSITIVE_INFINITY });
+        const tail = redactText(previewParts.tail, { maxString: Number.POSITIVE_INFINITY });
+        const cappedRaw = truncateUtf8Prefix(value, maxCaptureBytes);
+        const capped = redactText(cappedRaw, { maxString: Number.POSITIVE_INFINITY });
         const capturedBytes = Buffer.byteLength(capped, 'utf8');
         const sha256 = computeSha256Text(capped);
-        const captureTruncated = capturedBytes < bytes;
+        const captureTruncated = bytes > maxCaptureBytes;
         let artifact = null;
         if (!hasSensitiveKey && contextRoot && runState.spilled < maxSpills) {
             const filename = resolveSpillFilename(pathSegments, { ext: 'txt', used: runState.usedNames });
@@ -388,7 +393,15 @@ class ToolExecutor {
         const resolved = await this.resolveAlias(tool);
         const handler = this.handlers[resolved.tool];
         if (!handler) {
-            throw new Error(`Unknown tool: ${tool}`);
+            const candidates = Array.from(new Set([
+                ...Object.keys(this.handlers || {}),
+                ...Object.keys(this.aliasMap || {}),
+            ]));
+            const suggestions = suggest(tool, candidates, { limit: 6 });
+            const hint = suggestions.length > 0
+                ? `Did you mean: ${suggestions.join(', ')} (or call help() for the full list)`
+                : 'Call help() to list available tools';
+            throw ToolError.invalidParams({ message: `Unknown tool: ${tool}`, hint });
         }
         const traceId = args.trace_id || crypto.randomUUID();
         const parentSpanId = args.parent_span_id;

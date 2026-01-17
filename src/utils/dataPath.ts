@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // @ts-nocheck
 
+const ToolError = require('../errors/ToolError');
+
 function parsePath(path) {
   if (typeof path !== 'string' || path.trim().length === 0) {
-    throw new Error('Path must be a non-empty string');
+    throw ToolError.invalidParams({ field: 'path', message: 'Path must be a non-empty string' });
   }
 
   const segments = [];
@@ -42,7 +44,10 @@ function getPathValue(target, path, { defaultValue, required } = {}) {
   for (const segment of segments) {
     if (current === undefined || current === null) {
       if (required) {
-        throw new Error(`Path '${Array.isArray(path) ? path.join('.') : path}' not found`);
+        throw ToolError.invalidParams({
+          field: 'path',
+          message: `Path '${Array.isArray(path) ? path.join('.') : path}' not found`,
+        });
       }
       return defaultValue;
     }
@@ -50,7 +55,10 @@ function getPathValue(target, path, { defaultValue, required } = {}) {
   }
 
   if (current === undefined && required) {
-    throw new Error(`Path '${Array.isArray(path) ? path.join('.') : path}' not found`);
+    throw ToolError.invalidParams({
+      field: 'path',
+      message: `Path '${Array.isArray(path) ? path.join('.') : path}' not found`,
+    });
   }
 
   return current === undefined ? defaultValue : current;

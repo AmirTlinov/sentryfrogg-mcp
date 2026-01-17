@@ -8,6 +8,7 @@
 const fs = require('fs/promises');
 const { resolveRunbooksPath, resolveDefaultRunbooksPath } = require('../utils/paths');
 const { atomicWriteTextFile } = require('../utils/fsAtomic');
+const ToolError = require('../errors/ToolError');
 
 class RunbookService {
   constructor(logger) {
@@ -23,6 +24,7 @@ class RunbookService {
       saved: 0,
       created: 0,
       updated: 0,
+      errors: 0,
     };
     this.initPromise = this.load();
   }
@@ -55,6 +57,7 @@ class RunbookService {
       }
     } catch (error) {
       if (error.code !== 'ENOENT') {
+        this.stats.errors += 1;
         this.logger.warn('Failed to load runbooks file', { error: error.message, source });
       }
     }
@@ -72,17 +75,21 @@ class RunbookService {
 
   validateRunbook(runbook) {
     if (!runbook || typeof runbook !== 'object' || Array.isArray(runbook)) {
-      throw new Error('runbook must be an object');
+      throw ToolError.invalidParams({ field: 'runbook', message: 'runbook must be an object' });
     }
     if (!Array.isArray(runbook.steps) || runbook.steps.length === 0) {
-      throw new Error('runbook.steps must be a non-empty array');
+      throw ToolError.invalidParams({
+        field: 'runbook.steps',
+        message: 'runbook.steps must be a non-empty array',
+        hint: 'Provide at least one step: [{ tool: \"ssh\", args: { ... } }].',
+      });
     }
   }
 
   async setRunbook(name, runbook) {
     await this.ensureReady();
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('runbook name must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'name', message: 'runbook name must be a non-empty string' });
     }
     this.validateRunbook(runbook);
 
@@ -110,12 +117,16 @@ class RunbookService {
   async getRunbook(name) {
     await this.ensureReady();
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('runbook name must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'name', message: 'runbook name must be a non-empty string' });
     }
     const trimmed = name.trim();
     const entry = this.runbooks.get(trimmed);
     if (!entry) {
-      throw new Error(`runbook '${trimmed}' not found`);
+      throw ToolError.notFound({
+        code: 'RUNBOOK_NOT_FOUND',
+        message: `runbook '${trimmed}' not found`,
+        hint: 'Use action=runbook_list to see known runbooks.',
+      });
     }
     return { success: true, runbook: { name: trimmed, ...entry, source: this.sources.get(trimmed) || 'local' } };
   }
@@ -142,11 +153,15 @@ class RunbookService {
   async deleteRunbook(name) {
     await this.ensureReady();
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('runbook name must be a non-empty string');
+      throw ToolError.invalidParams({ field: 'name', message: 'runbook name must be a non-empty string' });
     }
     const trimmed = name.trim();
     if (!this.runbooks.delete(trimmed)) {
-      throw new Error(`runbook '${trimmed}' not found`);
+      throw ToolError.notFound({
+        code: 'RUNBOOK_NOT_FOUND',
+        message: `runbook '${trimmed}' not found`,
+        hint: 'Use action=runbook_list to see known runbooks.',
+      });
     }
     await this.persist();
     return { success: true, runbook: trimmed };

@@ -11,6 +11,7 @@ const path = require('path');
 const { createWriteStream } = require('fs');
 const { resolveCacheDir } = require('../utils/paths');
 const { atomicReplaceFile, atomicWriteTextFile, tempSiblingPath } = require('../utils/fsAtomic');
+const ToolError = require('../errors/ToolError');
 
 class CacheService {
   constructor(logger) {
@@ -27,7 +28,11 @@ class CacheService {
   ensureKey(key) {
     const normalized = typeof key === 'string' ? key.trim().toLowerCase() : '';
     if (!/^[a-f0-9]{64}$/.test(normalized)) {
-      throw new Error('Cache key must be a sha256 hex string');
+      throw ToolError.invalidParams({
+        field: 'key',
+        message: 'Cache key must be a sha256 hex string',
+        hint: 'Provide a 64-char hex digest, or omit key to auto-generate it from the request.',
+      });
     }
     return normalized;
   }

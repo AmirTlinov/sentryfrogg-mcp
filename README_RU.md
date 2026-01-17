@@ -24,6 +24,13 @@ SentryFrogg — MCP-сервер (stdio), который даёт LLM-агент
 - Безопасные дефолты для записи файлов (без перезаписи, если не указать `overwrite: true`).
 - Опциональный unsafe local режим для полной автономности агента (локальный exec + filesystem).
 
+## UX для агента (quality-of-life)
+- `help({ query })` умеет искать по ключевым словам в tools/actions/fields/aliases.
+- Опечатки получают подсказки “did you mean” для tool/action/параметров.
+- Ошибки типизированы и обычно дают `hint` + минимально рабочий пример.
+- Безопасные дефолты: секреты редактируются везде; “сырой” экспорт секретов — opt-in и gated.
+- Для долгих exec/SSH сценариев дефолтно больше явного статуса/прогресса, меньше “detached тишины”.
+
 ## Сценарии
 - Синхронизация или бэкфилл данных между API, SFTP и PostgreSQL.
 - Контролируемые операции по SSH с аудитом.
@@ -61,19 +68,25 @@ SentryFrogg — MCP-сервер (stdio), который даёт LLM-агент
 1. Установите зависимости: `npm install`
 2. Зарегистрируйте сервер в MCP-клиенте (stdio): см. `mcp_config.md`
 3. Запустите сервер: `npm start`
-4. В MCP-клиенте вызовите `help`, затем `profile_upsert` для PostgreSQL/SSH
+4. В MCP-клиенте вызовите `help` (попробуйте `help({ query: "ssh exec" })`), затем `profile_upsert` для PostgreSQL/SSH
 5. Для автономных write-сценариев настройте `policy_profiles` (см. `docs/tools.md`)
 
 ## Инструменты
 - `help`
+- `legend`
+- `mcp_workspace`
+- `mcp_jobs`
+- `mcp_artifacts`
 - `mcp_psql_manager`
 - `mcp_ssh_manager`
 - `mcp_api_client`
 - `mcp_state`
+- `mcp_repo`
 - `mcp_runbook`
 - `mcp_project`
 - `mcp_context`
-- `mcp_workspace`
+- `mcp_env`
+- `mcp_vault`
 - `mcp_capability`
 - `mcp_intent`
 - `mcp_evidence`
@@ -83,7 +96,7 @@ SentryFrogg — MCP-сервер (stdio), который даёт LLM-агент
 - `mcp_pipeline`
 - `mcp_local` (unsafe, опционально)
 
-Короткие алиасы: `sql`, `psql`, `ssh`, `http`, `api`, `state`, `runbook`, `workspace`, `pipeline` (и `local`, если включён unsafe режим).
+Короткие алиасы: например `sql`/`psql`, `ssh`, `api`/`http`, `repo`, `job`, `artifacts`, `workspace`, `intent`, `pipeline` (и `local`, если включён unsafe режим).
 
 Примеры и паттерны вызовов: `docs/tools.md`.
 

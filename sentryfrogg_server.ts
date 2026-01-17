@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-nocheck
 
-// SentryFrogg MCP Server v6.4.0
+// SentryFrogg MCP Server v7.0.1
 
 process.on('unhandledRejection', (reason, promise) => {
   process.stderr.write(`🔥 Unhandled Promise Rejection: ${reason}\n`);
@@ -29,7 +29,10 @@ const Ajv = require('ajv');
 
 const ServiceBootstrap = require('./src/bootstrap/ServiceBootstrap');
 const { isUnsafeLocalEnabled } = require('./src/utils/featureFlags');
-const { redactObject } = require('./src/utils/redact');
+const { redactObject, redactText } = require('./src/utils/redact');
+const { suggest } = require('./src/utils/suggest');
+const { normalizeArgsAliases } = require('./src/utils/argAliases');
+const { buildToolCallContextRef, buildToolCallFileRef, writeTextArtifact } = require('./src/utils/artifacts');
 const ToolError = require('./src/errors/ToolError');
 
 const HELP_TOOL_ALIASES = {
@@ -66,6 +69,391 @@ const CORE_TOOL_NAMES = new Set([
   'mcp_artifacts',
   'mcp_project',
 ]);
+
+const RESPONSE_MODES = new Set(['compact', 'ai']);
+
+function normalizeResponseMode(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (RESPONSE_MODES.has(normalized)) {
+    return normalized;
+  }
+  throw new McpError(
+    ErrorCode.InvalidParams,
+    `response_mode: expected one of ${Array.from(RESPONSE_MODES).join(', ')}`
+  );
+}
+
+function resolveResponseMode(args) {
+  const payload = args && typeof args === 'object' && !Array.isArray(args) ? args : null;
+  const explicit = payload && Object.prototype.hasOwnProperty.call(payload, 'response_mode')
+    ? normalizeResponseMode(payload.response_mode)
+    : null;
+  if (explicit) {
+    return explicit;
+  }
+  return 'ai';
+}
+
+function stripResponseMode(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return args;
+  }
+  if (!Object.prototype.hasOwnProperty.call(args, 'response_mode')) {
+    return args;
+  }
+  const { response_mode, ...rest } = args;
+  return rest;
+}
+
+function isMachineResponseMode(mode) {
+  return mode === 'ai' || mode === 'compact';
+}
+
+function presentToolName({ tool, invokedAs }) {
+  if (invokedAs) {
+    return invokedAs;
+  }
+  // DX-friendly aliases for a few high-leverage tools.
+  switch (tool) {
+    case 'mcp_ssh_manager':
+      return 'ssh';
+    case 'mcp_artifacts':
+      return 'artifacts';
+    case 'mcp_jobs':
+      return 'job';
+    default:
+      return tool;
+  }
+}
+
+function truncateUtf8Prefix(value, maxBytes) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
+    return '';
+  }
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) {
+    return value;
+  }
+
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const slice = value.slice(0, mid);
+    const bytes = Buffer.byteLength(slice, 'utf8');
+    if (bytes <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return value.slice(0, low);
+}
+
+function collectSecretValues(map) {
+  if (!map || typeof map !== 'object' || Array.isArray(map)) {
+    return null;
+  }
+  const out = [];
+  for (const raw of Object.values(map)) {
+    if (typeof raw !== 'string') {
+      continue;
+    }
+    const trimmed = raw.trim();
+    if (trimmed.length < 6) {
+      continue;
+    }
+    out.push(trimmed);
+    if (out.length >= 32) {
+      break;
+    }
+  }
+  return out.length ? out : null;
+}
+
+function buildSshNextActions(jobId) {
+  if (!jobId) {
+    return [];
+  }
+  return [
+    { tool: 'job', action: 'follow_job', args: { job_id: jobId, timeout_ms: 600000, lines: 120 } },
+    { tool: 'job', action: 'tail_job', args: { job_id: jobId, lines: 120 } },
+    { tool: 'job', action: 'job_cancel', args: { job_id: jobId } },
+  ];
+}
+
+function buildGenericEnvelope({ toolName, invokedAs, actionName, toolResult, meta, payload, artifactContext, artifactJson }) {
+  return {
+    success: toolResult && typeof toolResult === 'object' && typeof toolResult.success === 'boolean'
+      ? toolResult.success
+      : Boolean(payload?.ok ?? true),
+    tool: presentToolName({ tool: toolName, invokedAs }),
+    action: actionName || null,
+    result: redactObject(toolResult, { maxString: 20 * 1024 }),
+    duration_ms: meta?.duration_ms ?? null,
+    artifact_uri_context: artifactContext?.uri ?? null,
+    artifact_uri_json: artifactJson?.uri ?? null,
+    trace: {
+      trace_id: meta?.trace_id ?? null,
+      span_id: meta?.span_id ?? null,
+      parent_span_id: meta?.parent_span_id ?? null,
+    },
+  };
+}
+
+function buildSshExecEnvelope({ actionName, toolResult, meta, args, artifactJson }) {
+  const jobId = typeof toolResult?.job_id === 'string' && toolResult.job_id.trim().length
+    ? toolResult.job_id.trim()
+    : null;
+
+  const isFollow = Boolean(
+    toolResult
+      && typeof toolResult === 'object'
+      && Object.prototype.hasOwnProperty.call(toolResult, 'start')
+      && Object.prototype.hasOwnProperty.call(toolResult, 'wait')
+  );
+
+  const mode = actionName === 'exec_detached' || toolResult?.detached === true || Boolean(jobId)
+    ? 'detached'
+    : 'sync';
+
+  const exitCode = mode === 'sync'
+    ? (Number.isFinite(toolResult?.exitCode) ? Number(toolResult.exitCode) : null)
+    : (Number.isFinite(toolResult?.status?.exit_code) ? Number(toolResult.status.exit_code) : null);
+
+  const requestedTimeoutMs = toolResult?.requested_timeout_ms ?? args?.timeout_ms ?? null;
+
+  const timedOut = mode === 'sync'
+    ? Boolean(toolResult?.timedOut || toolResult?.hardTimedOut)
+    : (isFollow
+      ? Boolean(toolResult?.wait?.timed_out)
+      : Boolean(toolResult?.timedOut || toolResult?.hardTimedOut));
+
+  const durationMs = meta?.duration_ms ?? toolResult?.duration_ms ?? null;
+
+  const extraSecretValues = collectSecretValues(args?.env);
+  const redactionOptions = extraSecretValues
+    ? { extraSecretValues, maxString: Number.POSITIVE_INFINITY }
+    : { maxString: Number.POSITIVE_INFINITY };
+
+  const stdoutRaw = mode === 'sync'
+    ? String(toolResult?.stdout ?? '')
+    : (isFollow ? String(toolResult?.logs?.text ?? '') : String(toolResult?.stdout ?? ''));
+  const stderrRaw = mode === 'sync' ? String(toolResult?.stderr ?? '') : String(toolResult?.stderr ?? '');
+  const stdoutRedacted = redactText(stdoutRaw, redactionOptions);
+  const stderrRedacted = redactText(stderrRaw, redactionOptions);
+
+  const stdoutBound = truncateUtf8Prefix(stdoutRedacted, 32 * 1024);
+  const stderrBound = truncateUtf8Prefix(stderrRedacted, 16 * 1024);
+
+  const stdoutBytes = mode === 'sync' && Number.isFinite(toolResult?.stdout_bytes) ? Number(toolResult.stdout_bytes) : 0;
+  const stderrBytes = mode === 'sync' && Number.isFinite(toolResult?.stderr_bytes) ? Number(toolResult.stderr_bytes) : 0;
+
+  const stdoutTruncated = mode === 'sync'
+    ? Boolean(toolResult?.stdout_truncated || toolResult?.stdout_inline_truncated || stdoutBound.length < stdoutRedacted.length)
+    : false;
+  const stderrTruncated = mode === 'sync'
+    ? Boolean(toolResult?.stderr_truncated || toolResult?.stderr_inline_truncated || stderrBound.length < stderrRedacted.length)
+    : false;
+
+  const success = typeof toolResult?.success === 'boolean'
+    ? toolResult.success
+    : (exitCode === 0 && !timedOut);
+
+  const waitCompleted = mode === 'detached' && isFollow ? toolResult?.wait?.completed : null;
+  const waitWaitedMs = mode === 'detached' && isFollow ? toolResult?.wait?.waited_ms : null;
+
+  const summary = (mode === 'sync' && typeof durationMs === 'number' && exitCode !== null)
+    ? `exit ${exitCode}, ${durationMs}ms`
+    : (mode === 'detached' && exitCode !== null && waitCompleted === true && typeof durationMs === 'number')
+      ? `exit ${exitCode} (follow), ${durationMs}ms`
+      : (mode === 'detached' && timedOut === true && typeof waitWaitedMs === 'number')
+        ? `running (follow timed out after ${waitWaitedMs}ms)`
+        : (typeof durationMs === 'number' ? `detached, ${durationMs}ms` : (exitCode !== null ? `exit ${exitCode}` : 'detached'));
+
+  const nextActions = buildSshNextActions(jobId);
+  const stdoutUri = toolResult?.stdout_ref?.uri;
+  const stderrUri = toolResult?.stderr_ref?.uri;
+  if (mode === 'sync') {
+    if (stdoutTruncated && typeof stdoutUri === 'string' && stdoutUri.trim().length) {
+      nextActions.push({ tool: 'artifacts', action: 'tail', args: { uri: stdoutUri.trim(), max_bytes: 64 * 1024 } });
+    }
+    if (stderrTruncated && typeof stderrUri === 'string' && stderrUri.trim().length) {
+      nextActions.push({ tool: 'artifacts', action: 'tail', args: { uri: stderrUri.trim(), max_bytes: 64 * 1024 } });
+    }
+  }
+
+  return {
+    success,
+    tool: 'ssh',
+    action: actionName || 'exec',
+    mode,
+    exit_code: exitCode,
+    timed_out: timedOut,
+    duration_ms: typeof durationMs === 'number' ? durationMs : 0,
+    stdout: stdoutBound,
+    stderr: stderrBound,
+    stdout_bytes: stdoutBytes,
+    stderr_bytes: stderrBytes,
+    stdout_truncated: stdoutTruncated,
+    stderr_truncated: stderrTruncated,
+    job_id: mode === 'detached' ? jobId : null,
+    wait: mode === 'detached' && isFollow ? redactObject(toolResult?.wait ?? null, { maxString: 8 * 1024 }) : null,
+    status: mode === 'detached' && isFollow ? redactObject(toolResult?.status ?? null, { maxString: 8 * 1024 }) : null,
+    next_actions: nextActions,
+    trace: {
+      trace_id: meta?.trace_id ?? null,
+      span_id: meta?.span_id ?? null,
+      parent_span_id: meta?.parent_span_id ?? null,
+    },
+    summary,
+    artifact_uri_json: artifactJson?.uri ?? null,
+  };
+}
+
+function buildRepoExecEnvelope({ actionName, toolResult, meta, args, artifactJson }) {
+  const exitCode = Number.isFinite(toolResult?.exit_code) ? Number(toolResult.exit_code) : null;
+  const durationMs = meta?.duration_ms ?? toolResult?.duration_ms ?? 0;
+  const timedOut = Boolean(toolResult?.timed_out);
+
+  const extraSecretValues = collectSecretValues(args?.env);
+  const redactionOptions = extraSecretValues
+    ? { extraSecretValues, maxString: Number.POSITIVE_INFINITY }
+    : { maxString: Number.POSITIVE_INFINITY };
+
+  const stdoutRaw = String(toolResult?.stdout_inline ?? '');
+  const stderrRaw = String(toolResult?.stderr_inline ?? '');
+  const stdoutRedacted = redactText(stdoutRaw, redactionOptions);
+  const stderrRedacted = redactText(stderrRaw, redactionOptions);
+
+  const stdoutBound = truncateUtf8Prefix(stdoutRedacted, 32 * 1024);
+  const stderrBound = truncateUtf8Prefix(stderrRedacted, 16 * 1024);
+
+  const stdoutBytes = Number.isFinite(toolResult?.stdout_bytes) ? Number(toolResult.stdout_bytes) : 0;
+  const stderrBytes = Number.isFinite(toolResult?.stderr_bytes) ? Number(toolResult.stderr_bytes) : 0;
+
+  const stdoutTruncated = Boolean(toolResult?.stdout_truncated || toolResult?.stdout_inline_truncated || stdoutBound.length < stdoutRedacted.length);
+  const stderrTruncated = Boolean(toolResult?.stderr_truncated || toolResult?.stderr_inline_truncated || stderrBound.length < stderrRedacted.length);
+
+  const success = typeof toolResult?.success === 'boolean'
+    ? toolResult.success
+    : (exitCode === 0 && !timedOut);
+
+  const nextActions = [];
+  const stdoutUri = toolResult?.stdout_ref?.uri;
+  const stderrUri = toolResult?.stderr_ref?.uri;
+  if (stdoutTruncated && typeof stdoutUri === 'string' && stdoutUri.trim().length) {
+    nextActions.push({ tool: 'artifacts', action: 'tail', args: { uri: stdoutUri.trim(), max_bytes: 64 * 1024 } });
+  }
+  if (stderrTruncated && typeof stderrUri === 'string' && stderrUri.trim().length) {
+    nextActions.push({ tool: 'artifacts', action: 'tail', args: { uri: stderrUri.trim(), max_bytes: 64 * 1024 } });
+  }
+
+  const summary = exitCode !== null
+    ? `exit ${exitCode}, ${durationMs}ms`
+    : `exit ?, ${durationMs}ms`;
+
+  return {
+    success,
+    tool: 'repo',
+    action: actionName || 'exec',
+    mode: 'sync',
+    exit_code: exitCode,
+    timed_out: timedOut,
+    duration_ms: typeof durationMs === 'number' ? durationMs : 0,
+    stdout: stdoutBound,
+    stderr: stderrBound,
+    stdout_bytes: stdoutBytes,
+    stderr_bytes: stderrBytes,
+    stdout_truncated: stdoutTruncated,
+    stderr_truncated: stderrTruncated,
+    job_id: null,
+    next_actions: nextActions,
+    trace: {
+      trace_id: meta?.trace_id ?? null,
+      span_id: meta?.span_id ?? null,
+      parent_span_id: meta?.parent_span_id ?? null,
+    },
+    summary,
+    artifact_uri_json: artifactJson?.uri ?? null,
+  };
+}
+
+function buildLocalExecEnvelope({ actionName, toolResult, meta, args, artifactJson }) {
+  const exitCode = Number.isFinite(toolResult?.exit_code) ? Number(toolResult.exit_code) : null;
+  const durationMs = meta?.duration_ms ?? toolResult?.duration_ms ?? 0;
+  const timedOut = Boolean(toolResult?.timed_out);
+
+  const extraSecretValues = collectSecretValues(args?.env);
+  const redactionOptions = extraSecretValues
+    ? { extraSecretValues, maxString: Number.POSITIVE_INFINITY }
+    : { maxString: Number.POSITIVE_INFINITY };
+
+  const stdoutRaw = String(toolResult?.stdout ?? '');
+  const stderrRaw = String(toolResult?.stderr ?? '');
+  const stdoutRedacted = redactText(stdoutRaw, redactionOptions);
+  const stderrRedacted = redactText(stderrRaw, redactionOptions);
+
+  const stdoutBound = truncateUtf8Prefix(stdoutRedacted, 32 * 1024);
+  const stderrBound = truncateUtf8Prefix(stderrRedacted, 16 * 1024);
+
+  const stdoutBytes = Number.isFinite(toolResult?.stdout_bytes) ? Number(toolResult.stdout_bytes) : 0;
+  const stderrBytes = Number.isFinite(toolResult?.stderr_bytes) ? Number(toolResult.stderr_bytes) : 0;
+
+  const stdoutTruncated = Boolean(toolResult?.stdout_inline_truncated || stdoutBound.length < stdoutRedacted.length);
+  const stderrTruncated = Boolean(toolResult?.stderr_inline_truncated || stderrBound.length < stderrRedacted.length);
+
+  const success = typeof toolResult?.success === 'boolean'
+    ? toolResult.success
+    : (exitCode === 0 && !timedOut);
+
+  const nextActions = [];
+  const stdoutPath = toolResult?.stdout_path;
+  const stderrPath = toolResult?.stderr_path;
+  if (stdoutTruncated && typeof stdoutPath === 'string' && stdoutPath.trim().length) {
+    nextActions.push({ tool: 'local', action: 'fs_read', args: { path: stdoutPath.trim(), encoding: 'utf8', offset: 0, length: 64 * 1024 } });
+  }
+  if (stderrTruncated && typeof stderrPath === 'string' && stderrPath.trim().length) {
+    nextActions.push({ tool: 'local', action: 'fs_read', args: { path: stderrPath.trim(), encoding: 'utf8', offset: 0, length: 64 * 1024 } });
+  }
+
+  const summary = exitCode !== null
+    ? `exit ${exitCode}, ${durationMs}ms`
+    : `exit ?, ${durationMs}ms`;
+
+  return {
+    success,
+    tool: 'local',
+    action: actionName || 'exec',
+    mode: 'sync',
+    exit_code: exitCode,
+    timed_out: timedOut,
+    duration_ms: typeof durationMs === 'number' ? durationMs : 0,
+    stdout: stdoutBound,
+    stderr: stderrBound,
+    stdout_bytes: stdoutBytes,
+    stderr_bytes: stderrBytes,
+    stdout_truncated: stdoutTruncated,
+    stderr_truncated: stderrTruncated,
+    job_id: null,
+    next_actions: nextActions,
+    trace: {
+      trace_id: meta?.trace_id ?? null,
+      span_id: meta?.span_id ?? null,
+      parent_span_id: meta?.parent_span_id ?? null,
+    },
+    summary,
+    artifact_uri_json: artifactJson?.uri ?? null,
+  };
+}
 
 function resolveToolTier() {
   const raw = String(process.env.SENTRYFROGG_TOOL_TIER || process.env.SF_TOOL_TIER || 'full')
@@ -109,6 +497,14 @@ const toolCatalog = [
         action: {
           type: 'string',
           description: 'Опционально: конкретный action внутри инструмента (например, exec/profile_upsert).',
+        },
+        query: {
+          type: 'string',
+          description: 'Поиск по инструментам/alias/action/полям. Пример: { query: \"ssh exec\" }',
+        },
+        limit: {
+          type: 'integer',
+          description: 'Максимум результатов для query (по умолчанию 20).',
         },
         output: outputSchema,
         store_as: { type: ['string', 'object'] },
@@ -169,7 +565,7 @@ const toolCatalog = [
       properties: {
         action: {
           type: 'string',
-          enum: ['job_status', 'job_wait', 'job_logs_tail', 'job_cancel', 'job_forget', 'job_list'],
+          enum: ['job_status', 'job_wait', 'job_logs_tail', 'tail_job', 'follow_job', 'job_cancel', 'job_forget', 'job_list'],
         },
         job_id: { type: 'string' },
         timeout_ms: { type: 'integer' },
@@ -202,6 +598,7 @@ const toolCatalog = [
         rel: { type: 'string' },
         prefix: { type: 'string' },
         encoding: { type: 'string', enum: ['utf8', 'base64'] },
+        include_secrets: { type: 'boolean' },
         offset: { type: 'integer' },
         max_bytes: { type: 'integer' },
         limit: { type: 'integer' },
@@ -591,7 +988,7 @@ const toolCatalog = [
 	    inputSchema: {
 	      type: 'object',
 	      properties: {
-	        action: { type: 'string', enum: ['run', 'describe'] },
+	        action: { type: 'string', enum: ['run', 'describe', 'deploy_smoke'] },
 	        flow: { type: 'string', enum: ['http_to_sftp', 'sftp_to_http', 'http_to_postgres', 'sftp_to_postgres', 'postgres_to_sftp', 'postgres_to_http'] },
 	        project: { type: 'string' },
 	        project_name: { type: 'string' },
@@ -600,6 +997,25 @@ const toolCatalog = [
 	        environment: { type: 'string' },
 	        vault_profile_name: { type: 'string' },
 	        vault_profile: { type: 'string' },
+
+	        // deploy_smoke
+	        local_path: { type: 'string' },
+	        remote_path: { type: 'string' },
+	        url: { type: 'string' },
+	        restart: { type: 'string' },
+	        restart_command: { type: 'string' },
+	        overwrite: { type: 'boolean' },
+	        mkdirs: { type: 'boolean' },
+	        preserve_mtime: { type: 'boolean' },
+	        expect_code: { type: 'integer' },
+	        follow_redirects: { type: 'boolean' },
+	        insecure_ok: { type: 'boolean' },
+	        max_bytes: { type: 'integer' },
+	        settle_ms: { type: 'integer' },
+	        smoke_attempts: { type: 'integer' },
+	        smoke_delay_ms: { type: 'integer' },
+	        smoke_timeout_ms: { type: 'integer' },
+
 	        http: { type: 'object' },
 	        sftp: { type: 'object' },
 	        postgres: { type: 'object' },
@@ -749,7 +1165,7 @@ const toolCatalog = [
 	    inputSchema: {
 	      type: 'object',
 	      properties: {
-	        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test', 'authorized_keys_add', 'exec', 'exec_detached', 'job_status', 'job_wait', 'job_logs_tail', 'job_kill', 'job_forget', 'batch', 'system_info', 'check_host', 'sftp_list', 'sftp_exists', 'sftp_upload', 'sftp_download'] },
+	        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'profile_test', 'authorized_keys_add', 'exec', 'exec_detached', 'exec_follow', 'deploy_file', 'job_status', 'job_wait', 'job_logs_tail', 'tail_job', 'follow_job', 'job_kill', 'job_forget', 'batch', 'system_info', 'check_host', 'sftp_list', 'sftp_exists', 'sftp_upload', 'sftp_download'] },
 	        profile_name: { type: 'string' },
 	        include_secrets: { type: 'boolean' },
 	        connection: { type: 'object' },
@@ -766,6 +1182,8 @@ const toolCatalog = [
 	        public_key_path: { type: 'string' },
 	        authorized_keys_path: { type: 'string' },
 	        command: { type: 'string' },
+	        restart: { type: 'string' },
+	        restart_command: { type: 'string' },
         cwd: { type: 'string' },
         env: { type: 'object' },
 	        stdin: { type: 'string' },
@@ -778,6 +1196,7 @@ const toolCatalog = [
         lines: { type: 'integer' },
         poll_interval_ms: { type: 'integer' },
         timeout_ms: { type: 'integer' },
+        start_timeout_ms: { type: 'integer' },
         pty: { type: ['boolean', 'object'] },
         commands: { type: 'array', items: { type: 'object' } },
         parallel: { type: 'boolean' },
@@ -809,7 +1228,7 @@ const toolCatalog = [
 	    inputSchema: {
 	      type: 'object',
 	      properties: {
-	        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'request', 'paginate', 'download', 'check'] },
+	        action: { type: 'string', enum: ['profile_upsert', 'profile_get', 'profile_list', 'profile_delete', 'request', 'paginate', 'download', 'check', 'smoke_http'] },
 	        profile_name: { type: 'string' },
 	        include_secrets: { type: 'boolean' },
 	        project: { type: 'string' },
@@ -832,6 +1251,10 @@ const toolCatalog = [
         body_type: { type: 'string' },
         body_base64: { type: 'string' },
         form: { type: 'object' },
+        expect_code: { type: 'integer' },
+        follow_redirects: { type: 'boolean' },
+        insecure_ok: { type: 'boolean' },
+        max_bytes: { type: 'integer' },
         timeout_ms: { type: 'integer' },
         response_type: { type: 'string' },
         redirect: { type: 'string' },
@@ -934,25 +1357,435 @@ if (toolByName.mcp_local) {
 const ajv = new Ajv({ allErrors: true, strict: false });
 const validatorByTool = new Map();
 
-function formatSchemaErrors(errors) {
+function decodeJsonPointer(pointer) {
+  if (!pointer || typeof pointer !== 'string') {
+    return [];
+  }
+  const raw = pointer.startsWith('#') ? pointer.slice(1) : pointer;
+  if (!raw || raw === '/') {
+    return [];
+  }
+  return raw
+    .split('/')
+    .filter(Boolean)
+    .map((token) => token.replace(/~1/g, '/').replace(/~0/g, '~'));
+}
+
+function schemaNodeAt(schema, schemaPath) {
+  const tokens = decodeJsonPointer(schemaPath);
+  let current = schema;
+  for (const token of tokens) {
+    if (!current || typeof current !== 'object') {
+      return undefined;
+    }
+    current = current[token];
+  }
+  return current;
+}
+
+function schemaParentAt(schema, schemaPath) {
+  const tokens = decodeJsonPointer(schemaPath);
+  if (tokens.length === 0) {
+    return { node: schema, key: null };
+  }
+  const key = tokens[tokens.length - 1];
+  const parentTokens = tokens.slice(0, -1);
+  let current = schema;
+  for (const token of parentTokens) {
+    if (!current || typeof current !== 'object') {
+      return { node: undefined, key };
+    }
+    current = current[token];
+  }
+  return { node: current, key };
+}
+
+function formatJsonOneLine(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    return null;
+  }
+}
+
+function primaryToolAlias(toolName) {
+  switch (toolName) {
+    case 'mcp_ssh_manager':
+      return 'ssh';
+    case 'mcp_psql_manager':
+      return 'psql';
+    case 'mcp_api_client':
+      return 'api';
+    case 'mcp_repo':
+      return 'repo';
+    case 'mcp_state':
+      return 'state';
+    case 'mcp_project':
+      return 'project';
+    case 'mcp_context':
+      return 'context';
+    case 'mcp_workspace':
+      return 'workspace';
+    case 'mcp_jobs':
+      return 'job';
+    case 'mcp_artifacts':
+      return 'artifacts';
+    case 'mcp_env':
+      return 'env';
+    case 'mcp_vault':
+      return 'vault';
+    case 'mcp_runbook':
+      return 'runbook';
+    case 'mcp_capability':
+      return 'capability';
+    case 'mcp_intent':
+      return 'intent';
+    case 'mcp_evidence':
+      return 'evidence';
+    case 'mcp_alias':
+      return 'alias';
+    case 'mcp_preset':
+      return 'preset';
+    case 'mcp_audit':
+      return 'audit';
+    case 'mcp_pipeline':
+      return 'pipeline';
+    case 'mcp_local':
+      return 'local';
+    default:
+      return null;
+  }
+}
+
+function buildHelpHint({ toolName, actionName }) {
+  const alias = primaryToolAlias(toolName) || toolName;
+  if (!actionName) {
+    return `help({ tool: '${alias}' })`;
+  }
+  return `help({ tool: '${alias}', action: '${actionName}' })`;
+}
+
+function buildToolExample(toolName, actionName) {
+  if (!toolName || !actionName) {
+    return null;
+  }
+
+  if (toolName === 'mcp_ssh_manager') {
+    switch (actionName) {
+      case 'profile_upsert':
+        return {
+          action: 'profile_upsert',
+          profile_name: 'my-ssh',
+          connection: { host: 'example.com', port: 22, username: 'root', private_key_path: '~/.ssh/id_ed25519', host_key_policy: 'tofu' },
+        };
+      case 'authorized_keys_add':
+        return {
+          action: 'authorized_keys_add',
+          target: 'prod',
+          public_key_path: '~/.ssh/id_ed25519.pub',
+        };
+      case 'exec':
+        return {
+          action: 'exec',
+          target: 'prod',
+          command: 'uname -a',
+        };
+      case 'exec_follow':
+        return {
+          action: 'exec_follow',
+          target: 'prod',
+          command: 'sleep 60 && echo done',
+          timeout_ms: 600000,
+          lines: 120,
+        };
+      case 'exec_detached':
+        return {
+          action: 'exec_detached',
+          target: 'prod',
+          command: 'sleep 60 && echo done',
+          log_path: '/tmp/sentryfrogg-detached.log',
+        };
+      case 'deploy_file':
+        return {
+          action: 'deploy_file',
+          target: 'prod',
+          local_path: './build/app.bin',
+          remote_path: '/opt/myapp/app.bin',
+          overwrite: true,
+          restart: 'myapp',
+        };
+      case 'tail_job':
+        return {
+          action: 'tail_job',
+          job_id: '<job_id>',
+          lines: 120,
+        };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_project') {
+    switch (actionName) {
+      case 'project_upsert':
+        return {
+          action: 'project_upsert',
+          name: 'myapp',
+          project: {
+            default_target: 'prod',
+            targets: {
+              prod: {
+                ssh_profile: 'myapp-prod-ssh',
+                env_profile: 'myapp-prod-env',
+                postgres_profile: 'myapp-prod-db',
+                api_profile: 'myapp-prod-api',
+                cwd: '/opt/myapp',
+                env_path: '/opt/myapp/.env',
+              },
+            },
+          },
+        };
+      case 'project_use':
+        return { action: 'project_use', name: 'myapp', scope: 'persistent' };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_context') {
+    switch (actionName) {
+      case 'summary':
+        return { action: 'summary', project: 'myapp', target: 'prod' };
+      case 'refresh':
+        return { action: 'refresh', cwd: '/srv/myapp' };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_workspace') {
+    switch (actionName) {
+      case 'summary':
+        return { action: 'summary', project: 'myapp', target: 'prod' };
+      case 'diagnose':
+        return { action: 'diagnose' };
+      case 'run':
+        return { action: 'run', intent_type: 'k8s.diff', inputs: { overlay: '/repo/overlays/prod' } };
+      case 'cleanup':
+        return { action: 'cleanup' };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_env') {
+    switch (actionName) {
+      case 'profile_upsert':
+        return {
+          action: 'profile_upsert',
+          profile_name: 'myapp-prod-env',
+          secrets: { DATABASE_URL: 'ref:vault:kv2:secret/myapp/prod#DATABASE_URL' },
+        };
+      case 'write_remote':
+        return { action: 'write_remote', target: 'prod', overwrite: false, backup: true };
+      case 'run_remote':
+        return { action: 'run_remote', target: 'prod', command: 'printenv | head' };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_vault') {
+    switch (actionName) {
+      case 'profile_upsert':
+        return {
+          action: 'profile_upsert',
+          profile_name: 'corp-vault',
+          addr: 'https://vault.example.com',
+          namespace: 'team-a',
+          auth_type: 'approle',
+          role_id: '<role_id>',
+          secret_id: '<secret_id>',
+        };
+      case 'profile_test':
+        return { action: 'profile_test', profile_name: 'corp-vault' };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_psql_manager') {
+    switch (actionName) {
+      case 'query':
+        return { action: 'query', target: 'prod', sql: 'SELECT 1' };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_api_client') {
+    switch (actionName) {
+      case 'request':
+        return { action: 'request', target: 'prod', method: 'GET', url: '/health' };
+      case 'smoke_http':
+        return { action: 'smoke_http', url: 'https://example.com/healthz', expect_code: 200, follow_redirects: true, insecure_ok: true };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_repo') {
+    switch (actionName) {
+      case 'repo_info':
+        return { action: 'repo_info', repo_root: '/repo' };
+      case 'assert_clean':
+        return { action: 'assert_clean', repo_root: '/repo' };
+      case 'exec':
+        return { action: 'exec', repo_root: '/repo', command: 'git', args: ['status', '--short'] };
+      case 'apply_patch':
+        return {
+          action: 'apply_patch',
+          repo_root: '/repo',
+          apply: true,
+          patch: [
+            '*** Begin Patch',
+            '*** Add File: hello.txt',
+            '+Hello',
+            '*** End Patch',
+          ].join('\n') + '\n',
+        };
+      case 'git_commit':
+        return { action: 'git_commit', repo_root: '/repo', apply: true, message: 'chore(gitops): update manifests' };
+      case 'git_revert':
+        return { action: 'git_revert', repo_root: '/repo', apply: true, sha: 'HEAD' };
+      case 'git_push':
+        return { action: 'git_push', repo_root: '/repo', apply: true, remote: 'origin', branch: 'sf/gitops/update-123' };
+      default:
+        return { action: actionName, repo_root: '/repo' };
+    }
+  }
+
+  if (toolName === 'mcp_artifacts') {
+    switch (actionName) {
+      case 'get':
+        return { action: 'get', uri: 'artifact://runs/<trace>/tool_calls/<span>/result.json', max_bytes: 16384, encoding: 'utf8' };
+      case 'head':
+        return { action: 'head', uri: 'artifact://runs/<trace>/tool_calls/<span>/stdout.log', max_bytes: 16384, encoding: 'utf8' };
+      case 'tail':
+        return { action: 'tail', uri: 'artifact://runs/<trace>/tool_calls/<span>/stdout.log', max_bytes: 16384, encoding: 'utf8' };
+      case 'list':
+        return { action: 'list', prefix: 'runs/<trace>/tool_calls/<span>/', limit: 50 };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_jobs') {
+    switch (actionName) {
+      case 'follow_job':
+        return { action: 'follow_job', job_id: '<job_id>', timeout_ms: 600000, lines: 120 };
+      case 'tail_job':
+        return { action: 'tail_job', job_id: '<job_id>', lines: 120 };
+      case 'job_status':
+        return { action: 'job_status', job_id: '<job_id>' };
+      case 'job_cancel':
+        return { action: 'job_cancel', job_id: '<job_id>' };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  if (toolName === 'mcp_intent') {
+    switch (actionName) {
+      case 'compile':
+        return { action: 'compile', intent: { type: 'k8s.diff', inputs: { overlay: '/repo/overlay' } } };
+      case 'execute':
+        return { action: 'execute', apply: true, intent: { type: 'k8s.apply', inputs: { overlay: '/repo/overlay' } } };
+      default:
+        return { action: actionName };
+    }
+  }
+
+  return { action: actionName };
+}
+
+function formatSchemaErrors({ toolName, args, errors, schema }) {
   if (!Array.isArray(errors) || errors.length === 0) {
     return 'Invalid arguments';
   }
 
-  const rendered = errors.slice(0, 8).map((err) => {
-    const at = err.instancePath ? err.instancePath : '(root)';
-    if (err.keyword === 'additionalProperties' && err.params && err.params.additionalProperty) {
-      return `${at}: unknown field '${err.params.additionalProperty}'`;
-    }
-    if (err.keyword === 'type' && err.params && err.params.type) {
-      return `${at}: expected ${err.params.type}`;
-    }
-    return `${at}: ${err.message || err.keyword}`;
-  });
+  const payload = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  const action = typeof payload.action === 'string' ? payload.action : null;
+  const header = `Invalid arguments for ${toolName}${action ? `:${action}` : ''}`;
 
-  return errors.length > rendered.length
-    ? `${rendered.join('; ')} (+${errors.length - rendered.length} more)`
-    : rendered.join('; ');
+  const rendered = [];
+  const hints = [];
+  const didYouMeans = [];
+  let suggestedAction = null;
+
+  for (const err of errors.slice(0, 10)) {
+    const at = err.instancePath ? err.instancePath : '(root)';
+
+    if (err.keyword === 'additionalProperties' && err.params && err.params.additionalProperty) {
+      const unknown = String(err.params.additionalProperty);
+      rendered.push(`${at}: unknown field '${unknown}'`);
+
+      const parent = schemaParentAt(schema, err.schemaPath);
+      const props = parent?.node?.properties && typeof parent.node.properties === 'object'
+        ? Object.keys(parent.node.properties)
+        : [];
+      const suggestions = suggest(unknown, props, { limit: 3 });
+      if (suggestions.length > 0) {
+        didYouMeans.push(`field '${unknown}': ${suggestions.join(', ')}`);
+      }
+      continue;
+    }
+
+    if (err.keyword === 'enum' && err.params && Array.isArray(err.params.allowedValues)) {
+      const allowed = err.params.allowedValues.map(String);
+      const received = schemaNodeAt(payload, err.instancePath);
+      const receivedStr = received === undefined ? '' : String(received);
+      rendered.push(`${at}: expected one of ${allowed.slice(0, 12).join(', ')}${allowed.length > 12 ? ', ...' : ''}`);
+
+      const suggestions = suggest(receivedStr, allowed, { limit: 3 });
+      if (suggestions.length > 0) {
+        didYouMeans.push(`${at}: ${suggestions.join(', ')}`);
+        if (err.instancePath === '/action') {
+          suggestedAction = suggestions[0];
+        }
+      }
+      continue;
+    }
+
+    if (err.keyword === 'required' && err.params && err.params.missingProperty) {
+      rendered.push(`${at}: missing required field '${err.params.missingProperty}'`);
+      continue;
+    }
+
+    if (err.keyword === 'type' && err.params && err.params.type) {
+      rendered.push(`${at}: expected ${err.params.type}`);
+      continue;
+    }
+
+    rendered.push(`${at}: ${err.message || err.keyword}`);
+  }
+
+  const helpAction = suggestedAction || action;
+  hints.push(`Hint: ${buildHelpHint({ toolName, actionName: helpAction })}`);
+
+  const example = buildToolExample(toolName, helpAction);
+  const exampleText = example ? formatJsonOneLine(example) : null;
+  if (exampleText) {
+    hints.push(`Example: ${exampleText}`);
+  }
+
+  const lines = [header];
+  lines.push(...rendered.map((line) => `- ${line}`));
+  if (didYouMeans.length > 0) {
+    lines.push(`Did you mean: ${didYouMeans.slice(0, 3).join(' | ')}`);
+  }
+  lines.push(...hints);
+  return lines.join('\n');
 }
 
 function assertToolArgsValid(toolName, args) {
@@ -971,7 +1804,12 @@ function assertToolArgsValid(toolName, args) {
   }
 
   if (!validate(payload)) {
-    throw new McpError(ErrorCode.InvalidParams, formatSchemaErrors(validate.errors));
+    throw new McpError(ErrorCode.InvalidParams, formatSchemaErrors({
+      toolName: canonical,
+      args: payload,
+      errors: validate.errors,
+      schema: tool.inputSchema,
+    }));
   }
 }
 
@@ -1042,6 +1880,7 @@ const TOOL_SEMANTIC_FIELDS = new Set([
   'parent_span_id',
   'preset',
   'preset_name',
+  'response_mode',
 ]);
 
 function stripToolSemanticFields(schema) {
@@ -1279,6 +2118,50 @@ function formatHelpResultToContext(result) {
     return formatContextDoc(lines);
   }
 
+  if (result.query && Array.isArray(result.results)) {
+    lines.push(`A: help({ query: ${JSON.stringify(result.query)} })`);
+    if (result.hint) {
+      lines.push(`N: hint: ${result.hint}`);
+    }
+    if (Array.isArray(result.did_you_mean) && result.did_you_mean.length > 0) {
+      lines.push(`N: did_you_mean: ${result.did_you_mean.join(', ')}`);
+    }
+    lines.push('');
+    lines.push('Results:');
+    for (const entry of result.results) {
+      if (!entry || typeof entry !== 'object') {
+        continue;
+      }
+      const kind = entry.kind ? String(entry.kind) : 'item';
+      if (kind === 'action') {
+        const tool = entry.tool ? String(entry.tool) : '';
+        const action = entry.action ? String(entry.action) : '';
+        lines.push(`- action: ${tool}:${action}`);
+        continue;
+      }
+      if (kind === 'field') {
+        const tool = entry.tool ? String(entry.tool) : '';
+        const field = entry.field ? String(entry.field) : '';
+        lines.push(`- field: ${tool}.${field}`);
+        continue;
+      }
+      if (kind === 'tool_alias') {
+        lines.push(`- tool_alias: ${entry.alias} → ${entry.tool}`);
+        continue;
+      }
+      if (kind === 'alias') {
+        lines.push(`- alias: ${entry.alias} → ${entry.tool}`);
+        continue;
+      }
+      if (kind === 'tool') {
+        lines.push(`- tool: ${entry.tool}${entry.alias ? ` (alias: ${entry.alias})` : ''}`);
+        continue;
+      }
+      lines.push(`- ${kind}`);
+    }
+    return formatContextDoc(lines);
+  }
+
   if (result.name && Array.isArray(result.actions)) {
     lines.push(`A: help({ tool: '${result.name}'${result.action ? ", action: '" + result.action + "'" : ''} })`);
     if (result.description) {
@@ -1310,6 +2193,20 @@ function formatHelpResultToContext(result) {
       lines.push('```json');
       lines.push(JSON.stringify(result.example, null, 2));
       lines.push('```');
+    }
+
+    if (Array.isArray(result.examples) && result.examples.length > 0) {
+      lines.push('');
+      lines.push('Templates:');
+      for (const entry of result.examples.slice(0, 5)) {
+        if (!entry || typeof entry !== 'object') {
+          continue;
+        }
+        if (!entry.example || typeof entry.example !== 'object') {
+          continue;
+        }
+        lines.push(`- ${entry.action}`);
+      }
     }
 
     if (result.legend_hint) {
@@ -1519,7 +2416,7 @@ class SentryFroggServer {
     this.server = new Server(
       {
         name: 'sentryfrogg',
-        version: '6.4.0',
+        version: '7.0.1',
       },
       {
         capabilities: {
@@ -1538,7 +2435,7 @@ class SentryFroggServer {
       await this.setupHandlers();
       this.initialized = true;
       const logger = this.container.get('logger');
-      logger.info('SentryFrogg MCP Server v6.4.0 ready');
+      logger.info('SentryFrogg MCP Server v7.0.1 ready');
     } catch (error) {
       process.stderr.write(`Failed to initialize SentryFrogg MCP Server: ${error.message}\n`);
       throw error;
@@ -1553,10 +2450,33 @@ class SentryFroggServer {
     });
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
+      const { name } = request.params;
+      const rawArgs = request.params.arguments;
+      const responseMode = resolveResponseMode(rawArgs);
+      let args = stripResponseMode(rawArgs);
+      let normalization = null;
       const toolExecutor = this.container.get('toolExecutor');
 
       try {
+        if (isMachineResponseMode(responseMode) && args && typeof args === 'object' && !Array.isArray(args)) {
+          const isExec = args.action === 'exec';
+          const wantsInlineDefault = (name === 'mcp_repo' || name === 'mcp_local') && isExec;
+          if (wantsInlineDefault && !Object.prototype.hasOwnProperty.call(args, 'inline')) {
+            args = { ...args, inline: true };
+          }
+        }
+
+        if (args && typeof args === 'object' && !Array.isArray(args)) {
+          const canonical = HELP_TOOL_ALIASES[name] || name;
+          const schemaProps = toolByName[canonical]?.inputSchema?.properties;
+          const allowedKeys = schemaProps && typeof schemaProps === 'object'
+            ? new Set(Object.keys(schemaProps))
+            : null;
+          const normalized = normalizeArgsAliases(args, { tool: canonical, action: args.action, allowedKeys });
+          args = normalized.args;
+          normalization = normalized.normalization;
+        }
+
         assertToolArgsValid(name, args);
         let result;
         let payload;
@@ -1566,7 +2486,7 @@ class SentryFroggServer {
             const traceId = args?.trace_id || crypto.randomUUID();
             const spanId = args?.span_id || crypto.randomUUID();
             const parentSpanId = args?.parent_span_id;
-            result = this.handleHelp(args);
+            result = await this.handleHelp(args);
             payload = await toolExecutor.wrapResult({
               tool: name,
               args,
@@ -1608,9 +2528,17 @@ class SentryFroggServer {
           : payload;
 
         const contextRoot = resolveContextRepoRoot();
-        const artifact = contextRoot
-          ? buildArtifactRef({ traceId: meta?.trace_id, spanId: meta?.span_id })
-          : null;
+        let artifactContext = null;
+        let artifactJson = null;
+        if (contextRoot) {
+          try {
+            artifactContext = buildToolCallContextRef({ traceId: meta?.trace_id, spanId: meta?.span_id });
+            artifactJson = buildToolCallFileRef({ traceId: meta?.trace_id, spanId: meta?.span_id, filename: 'result.json' });
+          } catch (error) {
+            artifactContext = null;
+            artifactJson = null;
+          }
+        }
 
         let artifactWriteError;
         let artifactPath;
@@ -1640,13 +2568,14 @@ class SentryFroggServer {
             action: actionName,
             result: toolResult,
             meta,
-            artifactUri: artifact?.uri,
+            artifactUri: artifactContext?.uri,
           });
         }
 
-        if (artifact && contextRoot) {
+        if (artifactContext && contextRoot) {
           try {
-            artifactPath = await writeContextArtifact(contextRoot, artifact, text);
+            const written = await writeTextArtifact(contextRoot, artifactContext, text);
+            artifactPath = written.path;
           } catch (error) {
             artifactWriteError = error?.message || String(error);
           }
@@ -1662,7 +2591,7 @@ class SentryFroggServer {
                 action: actionName,
                 result: toolResult,
                 meta,
-                artifactUri: artifact.uri,
+                artifactUri: artifactContext.uri,
                 artifactWriteError,
               });
             }
@@ -1674,11 +2603,11 @@ class SentryFroggServer {
           }
 
           if (artifactPath) {
-            if (!text.includes(`R: ${artifact.uri}`)) {
+            if (!text.includes(`R: ${artifactContext.uri}`)) {
               if (text.includes('[CONTENT]\\n')) {
-                text = text.replace('[CONTENT]\\n', `[CONTENT]\\nR: ${artifact.uri}\\n`);
+                text = text.replace('[CONTENT]\\n', `[CONTENT]\\nR: ${artifactContext.uri}\\n`);
               } else {
-                text = text.replace('[DATA]\n', `[DATA]\nR: ${artifact.uri}\n`);
+                text = text.replace('[DATA]\n', `[DATA]\nR: ${artifactContext.uri}\n`);
               }
             }
             if (!text.includes(`N: artifact_path:`)) {
@@ -1691,11 +2620,44 @@ class SentryFroggServer {
           text = text.replace('[DATA]\\n', '[CONTENT]\\n');
         }
 
+        const isSshExec = toolName === 'mcp_ssh_manager'
+          && (actionName === 'exec' || actionName === 'exec_detached' || actionName === 'exec_follow');
+        const isRepoExec = toolName === 'mcp_repo' && actionName === 'exec';
+        const isLocalExec = toolName === 'mcp_local' && actionName === 'exec';
+        const envelope = isSshExec
+          ? buildSshExecEnvelope({ actionName: actionName || 'exec', toolResult, meta, args, artifactJson })
+          : (isRepoExec
+            ? buildRepoExecEnvelope({ actionName: actionName || 'exec', toolResult, meta, args, artifactJson })
+            : (isLocalExec
+              ? buildLocalExecEnvelope({ actionName: actionName || 'exec', toolResult, meta, args, artifactJson })
+              : buildGenericEnvelope({
+                toolName,
+                invokedAs: meta?.invoked_as,
+                actionName,
+                toolResult,
+                meta,
+                payload,
+                artifactContext,
+                artifactJson,
+              })));
+
+        if (normalization && envelope && typeof envelope === 'object') {
+          envelope.normalization = normalization;
+        }
+
+        if (artifactJson && contextRoot) {
+          try {
+            await writeTextArtifact(contextRoot, artifactJson, JSON.stringify(envelope));
+          } catch (error) {
+            envelope.artifact_uri_json = null;
+          }
+        }
+
         return {
           content: [
             {
               type: 'text',
-              text,
+              text: JSON.stringify(envelope),
             },
           ],
         };
@@ -1748,7 +2710,7 @@ class SentryFroggServer {
         "Основная UX-ось: один раз связать `project`+`target` с профилями → дальше вызывать `ssh`/`env`/`psql`/`api` только с `target`.",
       ],
       response: {
-        shape: 'Инструменты возвращают «сам результат» (после применения `output`). Ошибки возвращаются как MCP error.',
+        shape: 'По умолчанию инструменты возвращают строгий JSON envelope (для парсинга). Параллельно пишется .context артефакт для человека и `result.json` для машины (если настроен context repo root).',
         tracing: 'Корреляция (`trace_id`/`span_id`/`parent_span_id`) пишется в audit log и логи (stderr). Для просмотра используйте `mcp_audit`.',
       },
       common_fields: {
@@ -1795,6 +2757,11 @@ class SentryFroggServer {
         tracing: {
           meaning: 'Корреляция вызовов для логов/аудита/трасс. Можно прокидывать сверху вниз.',
           fields: ['`trace_id`', '`span_id`', '`parent_span_id`'],
+        },
+        response_mode: {
+          meaning: 'Формат ответа на этот tool-call: `ai|compact` (строгий JSON).',
+          values: ['`ai`', '`compact`'],
+          note: '`compact` сейчас эквивалентен `ai` (зарезервировано на будущее). Сервер пишет `result.json` (JSON-артефакт) и возвращает `artifact_uri_json`, если настроен context repo root.',
         },
       },
       resolution: {
@@ -1861,14 +2828,16 @@ class SentryFroggServer {
     };
   }
 
-  handleHelp(args = {}) {
+  async handleHelp(args = {}) {
     this.ensureInitialized();
     const rawTool = args.tool ? String(args.tool).trim().toLowerCase() : '';
     const rawAction = args.action ? String(args.action).trim() : '';
+    const rawQuery = args.query ? String(args.query).trim() : '';
 
     const tool = rawTool ? (HELP_TOOL_ALIASES[rawTool] || rawTool) : '';
     const action = rawAction || '';
     const tier = resolveToolTier();
+    const limit = Number.isFinite(Number(args.limit)) ? Math.max(1, Math.min(50, Math.floor(Number(args.limit)))) : 20;
 
     const extractActions = (toolName) => {
       const schema = toolByName[toolName]?.inputSchema;
@@ -1889,187 +2858,9 @@ class SentryFroggServer {
         'parent_span_id',
         'preset',
         'preset_name',
+        'response_mode',
       ]);
       return Object.keys(props).filter((key) => !ignored.has(key));
-    };
-
-    const buildExample = (toolName, actionName) => {
-      if (!toolName || !actionName) {
-        return null;
-      }
-
-      if (toolName === 'mcp_ssh_manager') {
-	        switch (actionName) {
-	          case 'profile_upsert':
-	            return {
-	              action: 'profile_upsert',
-	              profile_name: 'my-ssh',
-	              connection: { host: 'example.com', port: 22, username: 'root', private_key_path: '~/.ssh/id_ed25519', host_key_policy: 'tofu' },
-	            };
-          case 'authorized_keys_add':
-            return {
-              action: 'authorized_keys_add',
-              target: 'prod',
-              public_key_path: '~/.ssh/id_ed25519.pub',
-            };
-          case 'exec':
-            return {
-              action: 'exec',
-              target: 'prod',
-              command: 'uname -a',
-            };
-          case 'exec_detached':
-            return {
-              action: 'exec_detached',
-              target: 'prod',
-              command: 'sleep 60 && echo done',
-              log_path: '/tmp/sentryfrogg-detached.log',
-            };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      if (toolName === 'mcp_project') {
-        switch (actionName) {
-          case 'project_upsert':
-            return {
-              action: 'project_upsert',
-              name: 'myapp',
-              project: {
-                default_target: 'prod',
-                targets: {
-                  prod: {
-                    ssh_profile: 'myapp-prod-ssh',
-                    env_profile: 'myapp-prod-env',
-                    postgres_profile: 'myapp-prod-db',
-                    api_profile: 'myapp-prod-api',
-                    cwd: '/opt/myapp',
-                    env_path: '/opt/myapp/.env',
-                  },
-                },
-              },
-            };
-          case 'project_use':
-            return { action: 'project_use', name: 'myapp', scope: 'persistent' };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      if (toolName === 'mcp_context') {
-        switch (actionName) {
-          case 'summary':
-            return { action: 'summary', project: 'myapp', target: 'prod' };
-          case 'refresh':
-            return { action: 'refresh', cwd: '/srv/myapp' };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      if (toolName === 'mcp_workspace') {
-        switch (actionName) {
-          case 'summary':
-            return { action: 'summary', project: 'myapp', target: 'prod' };
-          case 'diagnose':
-            return { action: 'diagnose' };
-          case 'run':
-            return { action: 'run', intent_type: 'k8s.diff', inputs: { overlay: '/repo/overlays/prod' } };
-          case 'cleanup':
-            return { action: 'cleanup' };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      if (toolName === 'mcp_env') {
-        switch (actionName) {
-          case 'profile_upsert':
-            return {
-              action: 'profile_upsert',
-              profile_name: 'myapp-prod-env',
-              secrets: { DATABASE_URL: 'ref:vault:kv2:secret/myapp/prod#DATABASE_URL' },
-            };
-          case 'write_remote':
-            return { action: 'write_remote', target: 'prod', overwrite: false, backup: true };
-          case 'run_remote':
-            return { action: 'run_remote', target: 'prod', command: 'printenv | head' };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      if (toolName === 'mcp_vault') {
-        switch (actionName) {
-          case 'profile_upsert':
-            return {
-              action: 'profile_upsert',
-              profile_name: 'corp-vault',
-              addr: 'https://vault.example.com',
-              namespace: 'team-a',
-              auth_type: 'approle',
-              role_id: '<role_id>',
-              secret_id: '<secret_id>',
-            };
-          case 'profile_test':
-            return { action: 'profile_test', profile_name: 'corp-vault' };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      if (toolName === 'mcp_psql_manager') {
-        switch (actionName) {
-          case 'query':
-            return { action: 'query', target: 'prod', sql: 'SELECT 1' };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      if (toolName === 'mcp_api_client') {
-        switch (actionName) {
-          case 'request':
-            return { action: 'request', target: 'prod', method: 'GET', url: '/health' };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      if (toolName === 'mcp_repo') {
-        switch (actionName) {
-          case 'repo_info':
-            return { action: 'repo_info', repo_root: '/repo' };
-          case 'assert_clean':
-            return { action: 'assert_clean', repo_root: '/repo' };
-          case 'exec':
-            return { action: 'exec', repo_root: '/repo', command: 'git', args: ['status', '--short'] };
-          case 'apply_patch':
-            return { action: 'apply_patch', repo_root: '/repo', apply: true, patch: 'diff --git a/file b/file\n...' };
-          case 'git_commit':
-            return { action: 'git_commit', repo_root: '/repo', apply: true, message: 'chore(gitops): update manifests' };
-          case 'git_revert':
-            return { action: 'git_revert', repo_root: '/repo', apply: true, sha: 'HEAD' };
-          case 'git_push':
-            return { action: 'git_push', repo_root: '/repo', apply: true, remote: 'origin', branch: 'sf/gitops/update-123' };
-          default:
-            return { action: actionName, repo_root: '/repo' };
-        }
-      }
-
-      if (toolName === 'mcp_intent') {
-        switch (actionName) {
-          case 'compile':
-            return { action: 'compile', intent: { type: 'k8s.diff', inputs: { overlay: '/repo/overlay' } } };
-          case 'execute':
-            return { action: 'execute', apply: true, intent: { type: 'k8s.apply', inputs: { overlay: '/repo/overlay' } } };
-          default:
-            return { action: actionName };
-        }
-      }
-
-      return { action: actionName };
     };
 
     const summaries = {
@@ -2087,11 +2878,11 @@ class SentryFroggServer {
       },
       mcp_ssh_manager: {
         description: 'SSH: профили, exec/batch, диагностика и SFTP.',
-        usage: "profile_upsert/profile_list → (optional) authorized_keys_add → exec/exec_detached/batch/system_info/check_host/sftp_*",
+        usage: "profile_upsert/profile_list → (optional) authorized_keys_add → exec/exec_detached/exec_follow → job_* (tail_job/follow_job) → sftp_* (deploy_file)",
       },
       mcp_api_client: {
         description: 'HTTP: профили, request/paginate/download, retry/backoff, auth providers + cache.',
-        usage: "profile_upsert/profile_list → request/paginate/download/check",
+        usage: "profile_upsert/profile_list → request/paginate/download/check → smoke_http",
       },
       mcp_repo: {
         description: 'Repo: безопасные git/render/diff/patch операции в sandbox + allowlisted exec без shell.',
@@ -2115,7 +2906,7 @@ class SentryFroggServer {
       },
       mcp_jobs: {
         description: 'Jobs: единый реестр async задач (status/wait/logs/cancel/list).',
-        usage: 'job_status/job_wait/job_logs_tail/job_cancel/job_forget/job_list',
+        usage: 'job_status/job_wait/job_logs_tail/tail_job/follow_job/job_cancel/job_forget/job_list',
       },
       mcp_artifacts: {
         description: 'Artifacts: чтение и листинг artifact:// refs (bounded по умолчанию).',
@@ -2159,7 +2950,7 @@ class SentryFroggServer {
       },
       mcp_pipeline: {
         description: 'Pipelines: потоковые HTTP↔SFTP↔PostgreSQL сценарии.',
-        usage: 'run/describe',
+        usage: 'run/describe/deploy_smoke',
       },
     };
 
@@ -2170,15 +2961,252 @@ class SentryFroggServer {
       };
     }
 
+    const userAliases = [];
+    try {
+      const aliasService = this.container?.get('aliasService');
+      if (aliasService && typeof aliasService.listAliases === 'function') {
+        const listed = await aliasService.listAliases();
+        const aliases = Array.isArray(listed?.aliases) ? listed.aliases : [];
+        for (const entry of aliases) {
+          if (!entry || typeof entry !== 'object') {
+            continue;
+          }
+          if (!entry.name || !entry.tool) {
+            continue;
+          }
+          userAliases.push({
+            name: String(entry.name),
+            tool: String(entry.tool),
+            description: entry.description ? String(entry.description) : undefined,
+          });
+        }
+      }
+    } catch (error) {
+    }
+
+    if (!tool && rawQuery) {
+      const normalizeToken = (value) => String(value ?? '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, '');
+
+      const levenshtein = (aRaw, bRaw) => {
+        const a = String(aRaw ?? '');
+        const b = String(bRaw ?? '');
+        if (a === b) {
+          return 0;
+        }
+        const n = a.length;
+        const m = b.length;
+        if (n === 0) {
+          return m;
+        }
+        if (m === 0) {
+          return n;
+        }
+
+        const prev = new Array(m + 1);
+        const curr = new Array(m + 1);
+        for (let j = 0; j <= m; j += 1) {
+          prev[j] = j;
+        }
+        for (let i = 1; i <= n; i += 1) {
+          curr[0] = i;
+          const ai = a.charCodeAt(i - 1);
+          for (let j = 1; j <= m; j += 1) {
+            const cost = ai === b.charCodeAt(j - 1) ? 0 : 1;
+            curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+          }
+          for (let j = 0; j <= m; j += 1) {
+            prev[j] = curr[j];
+          }
+        }
+        return prev[m];
+      };
+
+      const maxAllowedDistance = (input) => {
+        const normalized = normalizeToken(input);
+        if (!normalized) {
+          return 0;
+        }
+        if (normalized.length <= 4) {
+          return 1;
+        }
+        if (normalized.length <= 8) {
+          return 2;
+        }
+        return Math.max(3, Math.floor(normalized.length * 0.35));
+      };
+
+      const termScore = (term, token) => {
+        const t = normalizeToken(term);
+        const cand = normalizeToken(token);
+        if (!t || !cand) {
+          return Number.POSITIVE_INFINITY;
+        }
+        if (cand.includes(t)) {
+          return cand.startsWith(t) ? 0 : 1;
+        }
+        const dist = levenshtein(t, cand);
+        const allowed = maxAllowedDistance(t);
+        if (dist <= allowed) {
+          return 10 + dist;
+        }
+        return Number.POSITIVE_INFINITY;
+      };
+
+      const terms = rawQuery.split(/\s+/).filter(Boolean).slice(0, 6);
+      const tierVisible = tier === 'core'
+        ? Object.fromEntries(Object.entries(summaries).filter(([key]) => CORE_TOOL_NAMES.has(key)))
+        : summaries;
+      const visibleToolNames = new Set(Object.keys(tierVisible));
+
+      const results = [];
+
+      for (const [toolName, summary] of Object.entries(summaries)) {
+        const alias = primaryToolAlias(toolName) || null;
+        results.push({
+          kind: 'tool',
+          tool: toolName,
+          alias,
+          exposed_in_tools_list: visibleToolNames.has(toolName),
+          description: summary?.description,
+          tokens: [toolName, alias, summary?.description].filter(Boolean),
+        });
+
+        const actions = extractActions(toolName);
+        for (const actionName of actions) {
+          const display = primaryToolAlias(toolName) || toolName;
+          results.push({
+            kind: 'action',
+            tool: toolName,
+            alias,
+            action: actionName,
+            exposed_in_tools_list: visibleToolNames.has(toolName),
+            hint: buildHelpHint({ toolName, actionName }),
+            tokens: [actionName, `${toolName}.${actionName}`, `${display}.${actionName}`],
+          });
+        }
+
+        const fields = extractFields(toolName);
+        for (const fieldName of fields) {
+          const display = primaryToolAlias(toolName) || toolName;
+          results.push({
+            kind: 'field',
+            tool: toolName,
+            alias,
+            field: fieldName,
+            exposed_in_tools_list: visibleToolNames.has(toolName),
+            hint: buildHelpHint({ toolName }),
+            tokens: [fieldName, `${toolName}.${fieldName}`, `${display}.${fieldName}`],
+          });
+        }
+      }
+
+      for (const [aliasName, toolName] of Object.entries(HELP_TOOL_ALIASES)) {
+        results.push({
+          kind: 'tool_alias',
+          alias: aliasName,
+          tool: toolName,
+          exposed_in_tools_list: visibleToolNames.has(toolName),
+          hint: buildHelpHint({ toolName }),
+          tokens: [aliasName, toolName],
+        });
+      }
+
+      for (const entry of userAliases) {
+        results.push({
+          kind: 'alias',
+          alias: entry.name,
+          tool: entry.tool,
+          description: entry.description,
+          exposed_in_tools_list: visibleToolNames.has(entry.tool),
+          tokens: [entry.name, entry.tool, entry.description].filter(Boolean),
+        });
+      }
+
+      const scored = [];
+      for (const item of results) {
+        const tokens = Array.isArray(item.tokens) ? item.tokens : [];
+        let total = 0;
+        let ok = true;
+
+        for (const term of terms) {
+          let best = Number.POSITIVE_INFINITY;
+          for (const token of tokens) {
+            const score = termScore(term, token);
+            if (score < best) {
+              best = score;
+            }
+          }
+          if (!Number.isFinite(best)) {
+            ok = false;
+            break;
+          }
+          total += best;
+        }
+
+        if (!ok) {
+          continue;
+        }
+
+        scored.push({ item, score: total });
+      }
+
+      scored.sort((a, b) => a.score - b.score);
+
+      const out = [];
+      for (const entry of scored) {
+        const item = entry.item;
+        if (item.kind === 'action') {
+          item.example = buildToolExample(item.tool, item.action);
+        }
+        delete item.tokens;
+        out.push(item);
+        if (out.length >= limit) {
+          break;
+        }
+      }
+
+      if (out.length === 0) {
+        const knownTools = Array.from(new Set([
+          ...Object.keys(summaries),
+          ...Object.keys(HELP_TOOL_ALIASES),
+          ...userAliases.map((a) => a.name),
+        ])).sort();
+
+        return {
+          query: rawQuery,
+          limit,
+          results: [],
+          did_you_mean: rawQuery ? suggest(rawQuery, knownTools, { limit: 5 }) : undefined,
+          hint: "Попробуйте: help({ tool: 'ssh' }) или help({ tool: 'ssh', action: 'exec' })",
+        };
+      }
+
+      return {
+        query: rawQuery,
+        limit,
+        results: out,
+        hint: "Для деталей используйте help({ tool: '<tool>', action: '<action>' })",
+      };
+    }
+
     if (tool) {
       if (tool === 'legend') {
         return this.buildLegendPayload();
       }
 
       if (!summaries[tool]) {
+        const knownTools = Array.from(new Set([
+          ...Object.keys(summaries),
+          ...Object.keys(HELP_TOOL_ALIASES),
+        ])).sort();
+        const suggestions = rawTool ? suggest(rawTool, knownTools, { limit: 5 }) : [];
         return {
           error: `Неизвестный инструмент: ${tool}`,
-          known_tools: Object.keys(summaries).sort(),
+          known_tools: knownTools,
+          did_you_mean: suggestions.length > 0 ? suggestions : undefined,
           hint: "Попробуйте: { tool: 'mcp_ssh_manager' } или { tool: 'ssh' }",
         };
       }
@@ -2198,21 +3226,45 @@ class SentryFroggServer {
 
       if (action) {
         if (actions.length > 0 && !actions.includes(action)) {
+          const suggestions = suggest(action, actions, { limit: 5 });
           return {
             ...entry,
             error: `Неизвестный action для ${tool}: ${action}`,
             known_actions: actions,
+            did_you_mean_actions: suggestions.length > 0 ? suggestions : undefined,
           };
         }
         return {
           ...entry,
           action,
-          example: buildExample(tool, action),
+          example: buildToolExample(tool, action),
         };
       }
 
+      const KEY_EXAMPLES = {
+        mcp_repo: ['repo_info', 'exec', 'apply_patch'],
+        mcp_ssh_manager: ['exec', 'exec_follow', 'deploy_file'],
+        mcp_artifacts: ['get', 'list'],
+        mcp_jobs: ['follow_job', 'tail_job'],
+        mcp_workspace: ['summary', 'suggest', 'run'],
+        mcp_context: ['summary', 'refresh'],
+        mcp_project: ['project_upsert', 'project_use'],
+        mcp_psql_manager: ['query', 'select'],
+        mcp_api_client: ['request', 'smoke_http'],
+      };
+
+      const chosen = Array.isArray(KEY_EXAMPLES[tool])
+        ? KEY_EXAMPLES[tool].filter((act) => actions.includes(act))
+        : actions.slice(0, 3);
+
+      const examples = chosen
+        .slice(0, 4)
+        .map((act) => ({ action: act, example: buildToolExample(tool, act) }))
+        .filter((item) => item.example);
+
       return {
         ...entry,
+        examples: examples.length > 0 ? examples : undefined,
         legend_hint: "См. `legend()` для семантики общих полей (`output`, `store_as`, `preset`, `project/target`).",
       };
     }
@@ -2284,7 +3336,7 @@ class SentryFroggServer {
     }
 
     return {
-      version: '6.4.0',
+      version: '7.0.1',
       architecture: 'lightweight-service-layer',
       ...ServiceBootstrap.getStats(),
     };

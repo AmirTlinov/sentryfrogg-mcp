@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def main() -> int:
+    root = _repo_root()
+
+    js = r"""
+const assert = require('node:assert/strict');
+const { startServer, readLine, terminate } = require('./dist/tests/util');
+
+const MCP_INIT = {
+  jsonrpc: '2.0',
+  id: 1,
+  method: 'initialize',
+  params: {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'dx-proof', version: '1.0.0' },
+  },
+};
+
+function callTool(id, name, args) {
+  return { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } };
+}
+
+function parseToolText(resp) {
+  assert.equal(resp.jsonrpc, '2.0');
+  assert.ok(resp.result);
+  assert.ok(Array.isArray(resp.result.content));
+  assert.equal(resp.result.content[0].type, 'text');
+  return resp.result.content[0].text;
+}
+
+(async () => {
+  const proc = startServer([], { SENTRYFROGG_UNSAFE_LOCAL: '1' });
+  try {
+    proc.stdin.write(JSON.stringify(MCP_INIT) + '\n');
+    JSON.parse(await readLine(proc.stdout));
+
+    // 1) local.exec basic
+    proc.stdin.write(JSON.stringify(callTool(2, 'mcp_local', {
+      action: 'exec',
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write("hi\\n")'],
+      response_mode: 'ai',
+      trace_id: 'trace-proof-1',
+      span_id: 'span-proof-1',
+    })) + '\n');
+    const env1 = JSON.parse(parseToolText(JSON.parse(await readLine(proc.stdout))));
+    console.log('local.exec:', {
+      exit_code: env1.exit_code,
+      stdout: env1.stdout,
+      stdout_truncated: env1.stdout_truncated,
+      artifact_uri_json: env1.artifact_uri_json,
+    });
+
+    // 2) truncation
+    proc.stdin.write(JSON.stringify(callTool(3, 'mcp_local', {
+      action: 'exec',
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write("x".repeat(200000))'],
+      response_mode: 'ai',
+      trace_id: 'trace-proof-2',
+      span_id: 'span-proof-2',
+    })) + '\n');
+    const env2 = JSON.parse(parseToolText(JSON.parse(await readLine(proc.stdout))));
+    console.log('truncate:', {
+      stdout_bytes: env2.stdout_bytes,
+      stdout_len: env2.stdout.length,
+      stdout_truncated: env2.stdout_truncated,
+    });
+
+    // 3) redaction
+    const fake = 'sk-1234567890abcdefghijklmnopqrstuvwxyz1234567890';
+    proc.stdin.write(JSON.stringify(callTool(4, 'mcp_local', {
+      action: 'exec',
+      command: process.execPath,
+      args: ['-e', `process.stdout.write(${JSON.stringify('token=' + fake + '\\n')})`],
+      response_mode: 'ai',
+      trace_id: 'trace-proof-3',
+      span_id: 'span-proof-3',
+    })) + '\n');
+    const env3 = JSON.parse(parseToolText(JSON.parse(await readLine(proc.stdout))));
+    console.log('redact:', { stdout: env3.stdout.trim(), contains_raw: env3.stdout.includes(fake) });
+
+    // 4) artifacts.get returns strict JSON
+    proc.stdin.write(JSON.stringify(callTool(5, 'mcp_state', {
+      action: 'set',
+      key: 'proof',
+      value: { ok: true },
+      scope: 'session',
+      response_mode: 'ai',
+      trace_id: 'trace-proof-4',
+      span_id: 'span-proof-4',
+    })) + '\n');
+    const env4 = JSON.parse(parseToolText(JSON.parse(await readLine(proc.stdout))));
+
+    proc.stdin.write(JSON.stringify(callTool(6, 'mcp_artifacts', {
+      action: 'get',
+      uri: env4.artifact_uri_json,
+      max_bytes: 1024 * 8,
+      encoding: 'utf8',
+      response_mode: 'ai',
+      trace_id: 'trace-proof-5',
+      span_id: 'span-proof-5',
+    })) + '\n');
+    const getEnv = JSON.parse(parseToolText(JSON.parse(await readLine(proc.stdout))));
+    const inner = JSON.parse(getEnv.result.content);
+    console.log('artifact.json:', {
+      ok: inner.tool === 'mcp_state' && inner.action === 'set',
+      uri: env4.artifact_uri_json,
+    });
+  } finally {
+    await terminate(proc);
+  }
+})().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
+""".strip()
+
+    print("== proof_dx ==")
+    print(f"repo: {root}")
+    print("\n$ node (stdio proof)")
+
+    proc = subprocess.run(
+        ["node", "-"],
+        input=js,
+        text=True,
+        cwd=root,
+        capture_output=True,
+    )
+    sys.stdout.write(proc.stdout)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

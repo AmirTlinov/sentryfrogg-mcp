@@ -5,6 +5,21 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+function normalizeEnvPath(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed) {
+    return null;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered === 'undefined' || lowered === 'null') {
+    return null;
+  }
+  return trimmed;
+}
+
 function resolveHomeDir() {
   try {
     const home = os.homedir();
@@ -15,8 +30,9 @@ function resolveHomeDir() {
 }
 
 function resolveXdgStateDir() {
-  if (process.env.XDG_STATE_HOME) {
-    return path.resolve(process.env.XDG_STATE_HOME);
+  const xdgStateHome = normalizeEnvPath(process.env.XDG_STATE_HOME);
+  if (xdgStateHome) {
+    return path.resolve(xdgStateHome);
   }
 
   const home = resolveHomeDir();
@@ -36,8 +52,9 @@ function resolveEntryDir() {
 }
 
 function resolveProfileBaseDir() {
-  if (process.env.MCP_PROFILES_DIR) {
-    return path.resolve(process.env.MCP_PROFILES_DIR);
+  const profilesDir = normalizeEnvPath(process.env.MCP_PROFILES_DIR);
+  if (profilesDir) {
+    return path.resolve(profilesDir);
   }
 
   const xdgStateDir = resolveXdgStateDir();
@@ -50,8 +67,9 @@ function resolveProfileBaseDir() {
 }
 
 function resolveProfileKeyPath() {
-  if (process.env.MCP_PROFILE_KEY_PATH) {
-    return path.resolve(process.env.MCP_PROFILE_KEY_PATH);
+  const profileKeyPath = normalizeEnvPath(process.env.MCP_PROFILE_KEY_PATH);
+  if (profileKeyPath) {
+    return path.resolve(profileKeyPath);
   }
 
   return path.join(resolveProfileBaseDir(), '.mcp_profiles.key');
@@ -62,7 +80,7 @@ module.exports = {
   resolveProfileKeyPath,
   resolveEntryDir,
   resolveStoreMode() {
-    if (process.env.MCP_PROFILES_DIR) {
+    if (normalizeEnvPath(process.env.MCP_PROFILES_DIR)) {
       return 'custom';
     }
     const xdgStateDir = resolveXdgStateDir();
@@ -79,32 +97,37 @@ module.exports = {
     };
   },
   resolveProfilesPath() {
-    if (process.env.MCP_PROFILES_PATH) {
-      return path.resolve(process.env.MCP_PROFILES_PATH);
+    const profilesPath = normalizeEnvPath(process.env.MCP_PROFILES_PATH);
+    if (profilesPath) {
+      return path.resolve(profilesPath);
     }
     return path.join(resolveProfileBaseDir(), 'profiles.json');
   },
   resolveStatePath() {
-    if (process.env.MCP_STATE_PATH) {
-      return path.resolve(process.env.MCP_STATE_PATH);
+    const statePath = normalizeEnvPath(process.env.MCP_STATE_PATH);
+    if (statePath) {
+      return path.resolve(statePath);
     }
     return path.join(resolveProfileBaseDir(), 'state.json');
   },
   resolveProjectsPath() {
-    if (process.env.MCP_PROJECTS_PATH) {
-      return path.resolve(process.env.MCP_PROJECTS_PATH);
+    const projectsPath = normalizeEnvPath(process.env.MCP_PROJECTS_PATH);
+    if (projectsPath) {
+      return path.resolve(projectsPath);
     }
     return path.join(resolveProfileBaseDir(), 'projects.json');
   },
   resolveRunbooksPath() {
-    if (process.env.MCP_RUNBOOKS_PATH) {
-      return path.resolve(process.env.MCP_RUNBOOKS_PATH);
+    const runbooksPath = normalizeEnvPath(process.env.MCP_RUNBOOKS_PATH);
+    if (runbooksPath) {
+      return path.resolve(runbooksPath);
     }
     return path.join(resolveProfileBaseDir(), 'runbooks.json');
   },
   resolveDefaultRunbooksPath() {
-    if (process.env.MCP_DEFAULT_RUNBOOKS_PATH) {
-      return path.resolve(process.env.MCP_DEFAULT_RUNBOOKS_PATH);
+    const defaultRunbooksPath = normalizeEnvPath(process.env.MCP_DEFAULT_RUNBOOKS_PATH);
+    if (defaultRunbooksPath) {
+      return path.resolve(defaultRunbooksPath);
     }
     const entryDir = resolveEntryDir();
     const candidates = [];
@@ -121,14 +144,16 @@ module.exports = {
     return candidates[0] || null;
   },
   resolveCapabilitiesPath() {
-    if (process.env.MCP_CAPABILITIES_PATH) {
-      return path.resolve(process.env.MCP_CAPABILITIES_PATH);
+    const capabilitiesPath = normalizeEnvPath(process.env.MCP_CAPABILITIES_PATH);
+    if (capabilitiesPath) {
+      return path.resolve(capabilitiesPath);
     }
     return path.join(resolveProfileBaseDir(), 'capabilities.json');
   },
   resolveDefaultCapabilitiesPath() {
-    if (process.env.MCP_DEFAULT_CAPABILITIES_PATH) {
-      return path.resolve(process.env.MCP_DEFAULT_CAPABILITIES_PATH);
+    const defaultCapabilitiesPath = normalizeEnvPath(process.env.MCP_DEFAULT_CAPABILITIES_PATH);
+    if (defaultCapabilitiesPath) {
+      return path.resolve(defaultCapabilitiesPath);
     }
     const entryDir = resolveEntryDir();
     const candidates = [];
@@ -145,50 +170,59 @@ module.exports = {
     return candidates[0] || null;
   },
   resolveContextPath() {
-    if (process.env.MCP_CONTEXT_PATH) {
-      return path.resolve(process.env.MCP_CONTEXT_PATH);
+    const contextPath = normalizeEnvPath(process.env.MCP_CONTEXT_PATH);
+    if (contextPath) {
+      return path.resolve(contextPath);
     }
     return path.join(resolveProfileBaseDir(), 'context.json');
   },
   resolveEvidenceDir() {
-    if (process.env.MCP_EVIDENCE_DIR) {
-      return path.resolve(process.env.MCP_EVIDENCE_DIR);
+    const evidenceDir = normalizeEnvPath(process.env.MCP_EVIDENCE_DIR);
+    if (evidenceDir) {
+      return path.resolve(evidenceDir);
     }
     return path.join(resolveProfileBaseDir(), '.sentryfrogg', 'evidence');
   },
   resolveAliasesPath() {
-    if (process.env.MCP_ALIASES_PATH) {
-      return path.resolve(process.env.MCP_ALIASES_PATH);
+    const aliasesPath = normalizeEnvPath(process.env.MCP_ALIASES_PATH);
+    if (aliasesPath) {
+      return path.resolve(aliasesPath);
     }
     return path.join(resolveProfileBaseDir(), 'aliases.json');
   },
   resolvePresetsPath() {
-    if (process.env.MCP_PRESETS_PATH) {
-      return path.resolve(process.env.MCP_PRESETS_PATH);
+    const presetsPath = normalizeEnvPath(process.env.MCP_PRESETS_PATH);
+    if (presetsPath) {
+      return path.resolve(presetsPath);
     }
     return path.join(resolveProfileBaseDir(), 'presets.json');
   },
   resolveAuditPath() {
-    if (process.env.MCP_AUDIT_PATH) {
-      return path.resolve(process.env.MCP_AUDIT_PATH);
+    const auditPath = normalizeEnvPath(process.env.MCP_AUDIT_PATH);
+    if (auditPath) {
+      return path.resolve(auditPath);
     }
     return path.join(resolveProfileBaseDir(), 'audit.jsonl');
   },
   resolveJobsPath() {
-    if (process.env.MCP_JOBS_PATH) {
-      return path.resolve(process.env.MCP_JOBS_PATH);
+    const jobsPath = normalizeEnvPath(process.env.MCP_JOBS_PATH);
+    if (jobsPath) {
+      return path.resolve(jobsPath);
     }
-    if (process.env.SENTRYFROGG_JOBS_PATH) {
-      return path.resolve(process.env.SENTRYFROGG_JOBS_PATH);
+    const sfJobsPath = normalizeEnvPath(process.env.SENTRYFROGG_JOBS_PATH);
+    if (sfJobsPath) {
+      return path.resolve(sfJobsPath);
     }
-    if (process.env.SF_JOBS_PATH) {
-      return path.resolve(process.env.SF_JOBS_PATH);
+    const shortJobsPath = normalizeEnvPath(process.env.SF_JOBS_PATH);
+    if (shortJobsPath) {
+      return path.resolve(shortJobsPath);
     }
     return path.join(resolveProfileBaseDir(), 'jobs.json');
   },
   resolveCacheDir() {
-    if (process.env.MCP_CACHE_DIR) {
-      return path.resolve(process.env.MCP_CACHE_DIR);
+    const cacheDir = normalizeEnvPath(process.env.MCP_CACHE_DIR);
+    if (cacheDir) {
+      return path.resolve(cacheDir);
     }
     return path.join(resolveProfileBaseDir(), 'cache');
   },

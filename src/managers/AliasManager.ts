@@ -5,6 +5,10 @@
  * 🧩 Alias manager.
  */
 
+const { unknownActionError } = require('../utils/toolErrors');
+
+const ALIAS_ACTIONS = ['alias_upsert', 'alias_get', 'alias_list', 'alias_delete', 'alias_resolve'];
+
 class AliasManager {
   constructor(logger, aliasService) {
     this.logger = logger.child('alias');
@@ -28,7 +32,7 @@ class AliasManager {
         return { success: true, alias: resolved ? { name: args.name, ...resolved } : null };
       }
       default:
-        throw new Error(`Unknown alias action: ${action}`);
+        throw unknownActionError({ tool: 'alias', action, knownActions: ALIAS_ACTIONS });
     }
   }
 

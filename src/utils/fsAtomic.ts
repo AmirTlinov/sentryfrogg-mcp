@@ -4,6 +4,7 @@
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
+const ToolError = require('../errors/ToolError');
 
 async function pathExists(filePath) {
   try {
@@ -44,7 +45,12 @@ async function chmodQuiet(filePath, mode) {
 
 async function atomicReplaceFile(tmpPath, targetPath, { overwrite = true, mode } = {}) {
   if (!overwrite && await pathExists(targetPath)) {
-    throw new Error(`Path already exists: ${targetPath}`);
+    throw ToolError.conflict({
+      code: 'PATH_EXISTS',
+      message: `Path already exists: ${targetPath}`,
+      hint: 'Set overwrite=true to replace it.',
+      details: { path: targetPath },
+    });
   }
 
   await ensureDirForFile(targetPath);
@@ -112,4 +118,3 @@ module.exports = {
   pathExists,
   tempSiblingPath,
 };
-

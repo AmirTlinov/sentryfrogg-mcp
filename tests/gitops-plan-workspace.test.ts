@@ -72,12 +72,17 @@ test('workspace.run executes gitops.plan without apply and returns render artifa
       )}\n`
     );
 
-    const text = parseToolText(JSON.parse(await readLine(proc.stdout)));
-    const renderLine = text
+    const envelope = JSON.parse(parseToolText(JSON.parse(await readLine(proc.stdout))));
+    assert.ok(envelope.artifact_uri_context, 'expected artifact_uri_context on envelope');
+    const contextRel = envelope.artifact_uri_context.replace(/^artifact:\/\//, '');
+    const contextPath = resolveArtifactPath(contextRoot, contextRel);
+    const contextText = await fs.readFile(contextPath, 'utf8');
+
+    const renderLine = contextText
       .split('\n')
       .find((line) => line.startsWith('R: artifact://') && line.includes('/render.yaml'));
 
-    assert.ok(renderLine, `expected render.yaml reference in output, got:\n${text}`);
+    assert.ok(renderLine, `expected render.yaml reference in output, got:\n${contextText}`);
 
     const uri = renderLine.slice(3).trim();
     const rel = uri.replace(/^artifact:\/\//, '');

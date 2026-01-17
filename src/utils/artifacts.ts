@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { once } = require('node:events');
+const ToolError = require('../errors/ToolError');
 
 const {
   atomicReplaceFile,
@@ -38,15 +39,15 @@ function resolveContextRepoRoot() {
 
 function normalizeSegment(value, label) {
   if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`${label} must be a non-empty string`);
+    throw ToolError.invalidParams({ field: label, message: `${label} must be a non-empty string` });
   }
 
   const trimmed = value.trim();
   if (trimmed === '.' || trimmed === '..') {
-    throw new Error(`${label} must not be '.' or '..'`);
+    throw ToolError.invalidParams({ field: label, message: `${label} must not be '.' or '..'` });
   }
   if (trimmed.includes('/') || trimmed.includes('\\')) {
-    throw new Error(`${label} must not contain path separators`);
+    throw ToolError.invalidParams({ field: label, message: `${label} must not contain path separators` });
   }
   return trimmed;
 }
@@ -54,7 +55,7 @@ function normalizeSegment(value, label) {
 function normalizeFilename(value) {
   const trimmed = normalizeSegment(value, 'filename');
   if (path.basename(trimmed) !== trimmed) {
-    throw new Error('filename must be a basename only');
+    throw ToolError.invalidParams({ field: 'filename', message: 'filename must be a basename only' });
   }
   return trimmed;
 }
@@ -82,22 +83,29 @@ function buildToolCallFileRef({ traceId, spanId, filename }) {
 
 function resolveArtifactPath(contextRoot, rel) {
   if (!contextRoot) {
-    throw new Error('contextRoot is required');
+    throw ToolError.internal({
+      code: 'CONTEXT_ROOT_REQUIRED',
+      message: 'contextRoot is required',
+    });
   }
   if (typeof rel !== 'string' || rel.trim().length === 0) {
-    throw new Error('artifact rel must be a non-empty string');
+    throw ToolError.invalidParams({ field: 'rel', message: 'artifact rel must be a non-empty string' });
   }
   const base = path.resolve(contextRoot, 'artifacts');
   const resolved = path.resolve(base, rel);
   if (resolved !== base && !resolved.startsWith(`${base}${path.sep}`)) {
-    throw new Error('Artifact path escapes context root');
+    throw ToolError.denied({
+      code: 'ARTIFACT_PATH_ESCAPES_ROOT',
+      message: 'Artifact path escapes context root',
+      hint: 'Use a rel path within the artifacts root.',
+    });
   }
   return resolved;
 }
 
 async function writeTextArtifact(contextRoot, ref, content, options = {}) {
   if (!ref || typeof ref !== 'object') {
-    throw new Error('artifact ref is required');
+    throw ToolError.internal({ code: 'ARTIFACT_REF_REQUIRED', message: 'artifact ref is required' });
   }
 
   const mode = options.mode ?? DEFAULT_FILE_MODE;
@@ -114,7 +122,7 @@ async function writeTextArtifact(contextRoot, ref, content, options = {}) {
 
 async function writeBinaryArtifact(contextRoot, ref, buffer, options = {}) {
   if (!ref || typeof ref !== 'object') {
-    throw new Error('artifact ref is required');
+    throw ToolError.internal({ code: 'ARTIFACT_REF_REQUIRED', message: 'artifact ref is required' });
   }
 
   const mode = options.mode ?? DEFAULT_FILE_MODE;
@@ -141,7 +149,7 @@ async function writeBinaryArtifact(contextRoot, ref, buffer, options = {}) {
 
 async function createArtifactWriteStream(contextRoot, ref, options = {}) {
   if (!ref || typeof ref !== 'object') {
-    throw new Error('artifact ref is required');
+    throw ToolError.internal({ code: 'ARTIFACT_REF_REQUIRED', message: 'artifact ref is required' });
   }
 
   const mode = options.mode ?? DEFAULT_FILE_MODE;
@@ -161,7 +169,7 @@ async function createArtifactWriteStream(contextRoot, ref, options = {}) {
 
   const finalize = async () => {
     if (aborted) {
-      throw new Error('artifact stream was aborted');
+      throw ToolError.internal({ code: 'ARTIFACT_STREAM_ABORTED', message: 'artifact stream was aborted' });
     }
     if (!finished) {
       finished = true;
@@ -213,10 +221,10 @@ async function createArtifactWriteStream(contextRoot, ref, options = {}) {
 
 async function copyFileArtifact(contextRoot, ref, sourcePath, options = {}) {
   if (!ref || typeof ref !== 'object') {
-    throw new Error('artifact ref is required');
+    throw ToolError.internal({ code: 'ARTIFACT_REF_REQUIRED', message: 'artifact ref is required' });
   }
   if (typeof sourcePath !== 'string' || sourcePath.trim().length === 0) {
-    throw new Error('sourcePath must be a non-empty string');
+    throw ToolError.invalidParams({ field: 'sourcePath', message: 'sourcePath must be a non-empty string' });
   }
 
   const mode = options.mode ?? DEFAULT_FILE_MODE;

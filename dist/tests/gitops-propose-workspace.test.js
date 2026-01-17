@@ -35,9 +35,10 @@ function parseToolText(resp) {
     return resp.result.content[0].text;
 }
 function parseTraceId(text) {
-    const traceLine = text.split('\n').find((line) => line.startsWith('N: trace_id:'));
-    assert.ok(traceLine, `expected trace_id in output, got:\n${text}`);
-    return traceLine.replace('N: trace_id:', '').trim();
+    const envelope = JSON.parse(text);
+    const traceId = envelope?.trace?.trace_id;
+    assert.ok(traceId, `expected trace.trace_id in output, got:\n${text}`);
+    return traceId;
 }
 function startFakeGithubServer() {
     const requests = [];
@@ -172,10 +173,15 @@ test('workspace.run executes gitops.propose with apply and creates a PR (GitHub 
         const mergeReq = fake.requests.find((r) => r.method === 'PUT');
         assert.ok(mergeReq);
         assert.equal(mergeReq.body.merge_method, 'squash');
-        const pushLine = text
+        const envelope = JSON.parse(text);
+        assert.ok(envelope.artifact_uri_context, 'expected artifact_uri_context on envelope');
+        const contextRel = envelope.artifact_uri_context.replace(/^artifact:\/\//, '');
+        const contextPath = resolveArtifactPath(contextRoot, contextRel);
+        const contextText = await fs.readFile(contextPath, 'utf8');
+        const pushLine = contextText
             .split('\n')
             .find((line) => line.startsWith('R: artifact://') && line.includes('/push.log'));
-        assert.ok(pushLine, `expected push.log reference in output, got:\n${text}`);
+        assert.ok(pushLine, `expected push.log reference in output, got:\n${contextText}`);
         const uri = pushLine.slice(3).trim();
         const rel = uri.replace(/^artifact:\/\//, '');
         const artifactPath = resolveArtifactPath(contextRoot, rel);

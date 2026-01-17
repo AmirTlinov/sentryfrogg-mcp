@@ -8,6 +8,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const fs = require('fs/promises');
 const { resolveAliasesPath } = require('../utils/paths');
 const { atomicWriteTextFile } = require('../utils/fsAtomic');
+const ToolError = require('../errors/ToolError');
 class AliasService {
     constructor(logger) {
         this.logger = logger.child('aliases');
@@ -18,6 +19,7 @@ class AliasService {
             saved: 0,
             created: 0,
             updated: 0,
+            errors: 0,
         };
         this.initPromise = this.load();
     }
@@ -35,6 +37,7 @@ class AliasService {
         }
         catch (error) {
             if (error.code !== 'ENOENT') {
+                this.stats.errors += 1;
                 this.logger.warn('Failed to load aliases file', { error: error.message });
             }
         }
@@ -49,21 +52,25 @@ class AliasService {
     }
     validateAlias(alias) {
         if (!alias || typeof alias !== 'object' || Array.isArray(alias)) {
-            throw new Error('alias must be an object');
+            throw ToolError.invalidParams({ field: 'alias', message: 'alias must be an object' });
         }
         if (!alias.tool || typeof alias.tool !== 'string' || alias.tool.trim().length === 0) {
-            throw new Error('alias.tool must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'alias.tool', message: 'alias.tool must be a non-empty string' });
         }
         if (alias.args !== undefined) {
             if (typeof alias.args !== 'object' || alias.args === null || Array.isArray(alias.args)) {
-                throw new Error('alias.args must be an object');
+                throw ToolError.invalidParams({ field: 'alias.args', message: 'alias.args must be an object' });
             }
         }
     }
     async setAlias(name, alias) {
         await this.ensureReady();
         if (typeof name !== 'string' || name.trim().length === 0) {
-            throw new Error('alias name must be a non-empty string');
+            throw ToolError.invalidParams({
+                field: 'name',
+                message: 'alias name must be a non-empty string',
+                hint: 'Use action=alias_list to see existing aliases.',
+            });
         }
         this.validateAlias(alias);
         const trimmed = name.trim();
@@ -86,12 +93,16 @@ class AliasService {
     async getAlias(name) {
         await this.ensureReady();
         if (typeof name !== 'string' || name.trim().length === 0) {
-            throw new Error('alias name must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'name', message: 'alias name must be a non-empty string' });
         }
         const trimmed = name.trim();
         const entry = this.aliases.get(trimmed);
         if (!entry) {
-            throw new Error(`alias '${trimmed}' not found`);
+            throw ToolError.notFound({
+                code: 'ALIAS_NOT_FOUND',
+                message: `alias '${trimmed}' not found`,
+                hint: 'Use action=alias_list to see known aliases.',
+            });
         }
         return { success: true, alias: { name: trimmed, ...entry } };
     }
@@ -112,11 +123,15 @@ class AliasService {
     async deleteAlias(name) {
         await this.ensureReady();
         if (typeof name !== 'string' || name.trim().length === 0) {
-            throw new Error('alias name must be a non-empty string');
+            throw ToolError.invalidParams({ field: 'name', message: 'alias name must be a non-empty string' });
         }
         const trimmed = name.trim();
         if (!this.aliases.delete(trimmed)) {
-            throw new Error(`alias '${trimmed}' not found`);
+            throw ToolError.notFound({
+                code: 'ALIAS_NOT_FOUND',
+                message: `alias '${trimmed}' not found`,
+                hint: 'Use action=alias_list to see known aliases.',
+            });
         }
         await this.persist();
         return { success: true, alias: trimmed };

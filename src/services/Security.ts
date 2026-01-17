@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const Constants = require('../constants/Constants');
 const { resolveProfileKeyPath } = require('../utils/paths');
+const ToolError = require('../errors/ToolError');
 
 const KEY_BYTES = Constants.BUFFERS.CRYPTO_KEY_SIZE;
 const IV_BYTES = Constants.BUFFERS.CRYPTO_IV_SIZE;
@@ -62,7 +63,12 @@ class Security {
     }
 
     if (bytes > maxBytes) {
-      throw new Error(`Payload exceeds size limit (${bytes} bytes > ${maxBytes} bytes)`);
+      throw ToolError.invalidParams({
+        field: 'payload',
+        message: `Payload exceeds size limit (${bytes} bytes > ${maxBytes} bytes)`,
+        hint: 'Reduce payload size, or increase SENTRYFROGG_MAX_PAYLOAD_BYTES / SF_MAX_PAYLOAD_BYTES.',
+        details: { bytes, max_bytes: maxBytes },
+      });
     }
 
     return { ok: true, bytes, maxBytes };
@@ -112,12 +118,16 @@ class Security {
 
   async decrypt(payload) {
     if (!payload || typeof payload !== 'string') {
-      throw new Error('Encrypted payload must be a string');
+      throw ToolError.invalidParams({ field: 'payload', message: 'Encrypted payload must be a string' });
     }
 
     const [ivHex, tagHex, dataHex] = payload.split(':');
     if (!ivHex || !tagHex || !dataHex) {
-      throw new Error('Invalid encrypted payload format');
+      throw ToolError.invalidParams({
+        field: 'payload',
+        message: 'Invalid encrypted payload format',
+        hint: 'Expected format: "<iv_hex>:<tag_hex>:<data_hex>".',
+      });
     }
 
     try {
@@ -125,29 +135,33 @@ class Security {
       const tag = Buffer.from(tagHex, 'hex');
       const encrypted = Buffer.from(dataHex, 'hex');
       if (tag.length !== TAG_BYTES) {
-        throw new Error('Invalid auth tag length');
+        throw ToolError.invalidParams({ field: 'payload', message: 'Invalid auth tag length' });
       }
       const decipher = crypto.createDecipheriv(this.algorithm, this.secretKey, iv);
       decipher.setAuthTag(tag);
       const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
       return decrypted.toString('utf8');
     } catch (error) {
-      throw new Error('Failed to decrypt secret payload');
+      throw ToolError.internal({
+        code: 'DECRYPT_FAILED',
+        message: 'Failed to decrypt secret payload',
+        hint: 'Ensure ENCRYPTION_KEY (or the persisted key file) matches the one used to encrypt stored secrets. If keys were rotated, re-create the profile secrets.',
+      });
     }
   }
 
   cleanCommand(command) {
     if (typeof command !== 'string') {
-      throw new Error('Command must be a string');
+      throw ToolError.invalidParams({ field: 'command', message: 'Command must be a string' });
     }
 
     const trimmed = command.trim();
     if (!trimmed) {
-      throw new Error('Command must not be empty');
+      throw ToolError.invalidParams({ field: 'command', message: 'Command must not be empty' });
     }
 
     if (trimmed.includes('\0')) {
-      throw new Error('Command contains null bytes');
+      throw ToolError.invalidParams({ field: 'command', message: 'Command contains null bytes' });
     }
 
     return trimmed;
@@ -155,13 +169,13 @@ class Security {
 
   ensureUrl(url) {
     if (typeof url !== 'string') {
-      throw new Error('URL must be a string');
+      throw ToolError.invalidParams({ field: 'url', message: 'URL must be a string' });
     }
 
     try {
       return new URL(url);
     } catch (error) {
-      throw new Error('Invalid URL');
+      throw ToolError.invalidParams({ field: 'url', message: 'Invalid URL' });
     }
   }
 }

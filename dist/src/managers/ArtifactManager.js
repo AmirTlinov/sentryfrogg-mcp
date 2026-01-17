@@ -7,7 +7,44 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const ToolError = require('../errors/ToolError');
 const { resolveContextRepoRoot, resolveArtifactPath } = require('../utils/artifacts');
+const { isTruthy } = require('../utils/featureFlags');
+const { redactText } = require('../utils/redact');
 const { pathExists } = require('../utils/fsAtomic');
+const { unknownActionError } = require('../utils/toolErrors');
+const ARTIFACT_ACTIONS = ['get', 'head', 'tail', 'list'];
+function allowSecretExport() {
+    return isTruthy(process.env.SENTRYFROGG_ALLOW_SECRET_EXPORT) || isTruthy(process.env.SF_ALLOW_SECRET_EXPORT);
+}
+function seemsText(buffer) {
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+        return true;
+    }
+    const sample = buffer.subarray(0, Math.min(buffer.length, 4096));
+    let nonPrintable = 0;
+    for (const byte of sample) {
+        if (byte === 0) {
+            return false;
+        }
+        const isPrintableAscii = byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte <= 126);
+        if (!isPrintableAscii) {
+            nonPrintable += 1;
+        }
+    }
+    return nonPrintable / sample.length < 0.3;
+}
+function ensureSecretExportAllowed(includeSecrets) {
+    if (includeSecrets !== true) {
+        return;
+    }
+    if (allowSecretExport()) {
+        return;
+    }
+    throw ToolError.denied({
+        code: 'SECRET_EXPORT_DISABLED',
+        message: 'include_secrets=true is disabled for artifacts',
+        hint: 'Set SENTRYFROGG_ALLOW_SECRET_EXPORT=1 (or SF_ALLOW_SECRET_EXPORT=1) to enable break-glass secret export.',
+    });
+}
 function readPositiveInt(value) {
     if (value === undefined || value === null || value === '') {
         return null;
@@ -107,11 +144,7 @@ class ArtifactManager {
             case 'list':
                 return this.list(args);
             default:
-                throw ToolError.invalidParams({
-                    field: 'action',
-                    message: `Unknown artifacts action: ${action}`,
-                    hint: 'Use one of: get, head, tail, list.',
-                });
+                throw unknownActionError({ tool: 'artifacts', action, knownActions: ARTIFACT_ACTIONS });
         }
     }
     resolveContextRoot() {
@@ -142,6 +175,8 @@ class ArtifactManager {
     }
     async get(args = {}) {
         const resolved = await this.resolveFilePath({ uri: args.uri, rel: args.rel });
+        const includeSecrets = args.include_secrets === true;
+        ensureSecretExportAllowed(includeSecrets);
         const maxBytes = Math.min(readPositiveInt(args.max_bytes) ?? 64 * 1024, 10 * 1024 * 1024);
         const offset = readPositiveInt(args.offset) ?? 0;
         const slice = await readFileSlice(resolved.filePath, { offset, length: maxBytes });
@@ -158,16 +193,35 @@ class ArtifactManager {
             encoding,
         };
         if (encoding === 'base64') {
+            if (!includeSecrets && seemsText(slice.buffer)) {
+                throw ToolError.denied({
+                    code: 'ARTIFACT_BASE64_BLOCKED',
+                    message: 'base64 artifact reads are blocked for text artifacts by default',
+                    hint: "Use encoding='utf8' (redacted view), or set include_secrets=true (requires SENTRYFROGG_ALLOW_SECRET_EXPORT=1).",
+                    details: { uri: resolved.uri, rel: resolved.rel, encoding },
+                });
+            }
             payload.content_base64 = slice.buffer.toString('base64');
         }
         else {
-            payload.content = slice.buffer.toString('utf8');
+            const raw = slice.buffer.toString('utf8');
+            if (includeSecrets) {
+                payload.content = raw;
+                payload.redacted = false;
+            }
+            else {
+                const redacted = redactText(raw, { maxString: Number.POSITIVE_INFINITY });
+                payload.content = redacted;
+                payload.redacted = redacted !== raw;
+            }
             payload.encoding = 'utf8';
         }
         return payload;
     }
     async head(args = {}) {
         const resolved = await this.resolveFilePath({ uri: args.uri, rel: args.rel });
+        const includeSecrets = args.include_secrets === true;
+        ensureSecretExportAllowed(includeSecrets);
         const maxBytes = Math.min(readPositiveInt(args.max_bytes) ?? 64 * 1024, 10 * 1024 * 1024);
         const slice = await readFileSlice(resolved.filePath, { offset: 0, length: maxBytes });
         const encoding = String(args.encoding || 'utf8').toLowerCase();
@@ -183,16 +237,35 @@ class ArtifactManager {
             encoding,
         };
         if (encoding === 'base64') {
+            if (!includeSecrets && seemsText(slice.buffer)) {
+                throw ToolError.denied({
+                    code: 'ARTIFACT_BASE64_BLOCKED',
+                    message: 'base64 artifact reads are blocked for text artifacts by default',
+                    hint: "Use encoding='utf8' (redacted view), or set include_secrets=true (requires SENTRYFROGG_ALLOW_SECRET_EXPORT=1).",
+                    details: { uri: resolved.uri, rel: resolved.rel, encoding },
+                });
+            }
             payload.content_base64 = slice.buffer.toString('base64');
         }
         else {
-            payload.content = slice.buffer.toString('utf8');
+            const raw = slice.buffer.toString('utf8');
+            if (includeSecrets) {
+                payload.content = raw;
+                payload.redacted = false;
+            }
+            else {
+                const redacted = redactText(raw, { maxString: Number.POSITIVE_INFINITY });
+                payload.content = redacted;
+                payload.redacted = redacted !== raw;
+            }
             payload.encoding = 'utf8';
         }
         return payload;
     }
     async tail(args = {}) {
         const resolved = await this.resolveFilePath({ uri: args.uri, rel: args.rel });
+        const includeSecrets = args.include_secrets === true;
+        ensureSecretExportAllowed(includeSecrets);
         const maxBytes = Math.min(readPositiveInt(args.max_bytes) ?? 64 * 1024, 10 * 1024 * 1024);
         const slice = await readTailSlice(resolved.filePath, { length: maxBytes });
         const encoding = String(args.encoding || 'utf8').toLowerCase();
@@ -208,10 +281,27 @@ class ArtifactManager {
             encoding,
         };
         if (encoding === 'base64') {
+            if (!includeSecrets && seemsText(slice.buffer)) {
+                throw ToolError.denied({
+                    code: 'ARTIFACT_BASE64_BLOCKED',
+                    message: 'base64 artifact reads are blocked for text artifacts by default',
+                    hint: "Use encoding='utf8' (redacted view), or set include_secrets=true (requires SENTRYFROGG_ALLOW_SECRET_EXPORT=1).",
+                    details: { uri: resolved.uri, rel: resolved.rel, encoding },
+                });
+            }
             payload.content_base64 = slice.buffer.toString('base64');
         }
         else {
-            payload.content = slice.buffer.toString('utf8');
+            const raw = slice.buffer.toString('utf8');
+            if (includeSecrets) {
+                payload.content = raw;
+                payload.redacted = false;
+            }
+            else {
+                const redacted = redactText(raw, { maxString: Number.POSITIVE_INFINITY });
+                payload.content = redacted;
+                payload.redacted = redacted !== raw;
+            }
             payload.encoding = 'utf8';
         }
         return payload;
